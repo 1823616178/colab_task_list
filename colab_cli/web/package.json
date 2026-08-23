@@ -1,0 +1,43 @@
+{
+  "name": "colab-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "lint": "eslint . && stylelint \"**/*.{vue,css}\" && nuxt typecheck",
+    "runner": "node scripts/start-runner.mjs",
+    "typecheck": "nuxt typecheck",
+    "test": "node --test \"tests/*.test.ts\"",
+    "start": "node --env-file-if-exists=.env .output/server/index.mjs"
+  },
+  "dependencies": {
+    "@pinia/nuxt": "^1.0.2",
+    "argon2": "^0.45.1",
+    "basic-ftp": "^6.2.0",
+    "jsonwebtoken": "^9.0.3",
+    "mysql2": "^3.23.4",
+    "nuxt": "^3.21.11",
+    "pinia": "^4.0.3",
+    "typeorm": "^1.1.0",
+    "vue": "^3.5.41",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@nuxt/eslint": "^1.17.0",
+    "@types/jsonwebtoken": "^9.0.10",
+    "eslint": "^10.9.0",
+    "postcss-html": "^2.0.0",
+    "stylelint": "^17.14.1",
+    "stylelint-config-html": "^2.0.0",
+    "stylelint-config-recommended-vue": "^2.0.0",
+    "stylelint-config-standard": "^40.0.0",
+    "stylelint-config-standard-scss": "^17.0.0",
+    "stylelint-config-standard-vue": "^2.0.0",
+    "typescript": "^6.0.3",
+    "vue-tsc": "^3.3.11"
+  }
+}

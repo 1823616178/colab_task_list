@@ -1,0 +1,15 @@
+{
+  "id": "laycatbot/kagglehub-demo",
+  "title": "kagglehub-demo",
+  "code_file": "kagglehub-demo.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": ["uciml/iris"],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "category_ids": []
+}

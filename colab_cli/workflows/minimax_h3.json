@@ -1,0 +1,57 @@
+{
+  "name": "MiniMax H3 首帧视频",
+  "api_json": "../../api.json",
+  "supported_accelerators": [
+    "gpu"
+  ],
+  "accelerator_note": "MiniMax H3 的 ComfyUI 节点使用 CUDA/PyTorch，不能直接在 TPU 上运行。",
+  "input_fields": [
+    {
+      "class_type": "LoadImage",
+      "field": "image",
+      "local_dir": "../image"
+    }
+  ],
+  "editable_fields": [
+    {
+      "key": "prompt",
+      "label": "视频 Prompt",
+      "class_type": "MiniMaxH3ImageToVideo",
+      "field": "prompt",
+      "control": "textarea",
+      "rows": 10,
+      "help": "本次任务使用这里的值，并自动保存为当前用户草稿；不会修改工作流文件。"
+    }
+  ],
+  "comfy_flags": [],
+  "models": [
+    {
+      "repo": "Comfy-Org/MiniMax-H3",
+      "filename": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "comfy_dir": "diffusion_models",
+      "cache_path": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "size_bytes": 20970379616
+    },
+    {
+      "repo": "Comfy-Org/MiniMax-H3",
+      "filename": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "comfy_dir": "text_encoders",
+      "cache_path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "size_bytes": 15687142551
+    },
+    {
+      "repo": "Comfy-Org/MiniMax-H3",
+      "filename": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "comfy_dir": "vae",
+      "cache_path": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "size_bytes": 5207808496
+    },
+    {
+      "repo": "Comfy-Org/MiniMax-H3",
+      "filename": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "comfy_dir": "vae",
+      "cache_path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "size_bytes": 605254808
+    }
+  ]
+}

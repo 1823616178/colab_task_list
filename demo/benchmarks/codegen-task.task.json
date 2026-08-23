@@ -1,0 +1,6 @@
+{
+  "versionNumber": 1,
+  "name": "codegen-task",
+  "description": "\u8ba9 LLM \u5199\u4e00\u4e2a\u5feb\u6392\u51fd\u6570, \u68c0\u67e5\u8f93\u51fa\u662f\u5426\u5305\u542b\u51fd\u6570\u5b9a\u4e49",
+  "definition": "@kbench.task(\n    name=\"codegen-task\",\n    description=\"\u8ba9 LLM \u5199\u4e00\u4e2a\u5feb\u6392\u51fd\u6570, \u68c0\u67e5\u8f93\u51fa\u662f\u5426\u5305\u542b\u51fd\u6570\u5b9a\u4e49\",\n)\ndef codegen(llm) -> None:\n    response = llm.prompt(\n        \"Write a Python function `quick_sort(arr)` implementing quicksort, \"\n        \"with a docstring and type hints. Output ONLY the code.\"\n    )\n    print(\"=== \u6a21\u578b\u8f93\u51fa ===\")\n    print(response)\n    kbench.assertions.assert_in(\n        \"def quick_sort\", response,\n        expectation=\"\u8f93\u51fa\u4e2d\u5e94\u5305\u542b quick_sort \u51fd\u6570\u5b9a\u4e49\",\n    )\n"
+}

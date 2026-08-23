@@ -1,0 +1,8 @@
+{
+  "extends": "./.nuxt/tsconfig.json",
+  "compilerOptions": {
+    // tests/ 用 node:test + Node 原生 strip-types 直跑 TS，
+    // 相对 import 必须带 .ts 后缀（运行时不做扩展名解析）。
+    "allowImportingTsExtensions": true
+  }
+}

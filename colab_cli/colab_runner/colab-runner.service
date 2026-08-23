@@ -1,0 +1,42 @@
+# colab-runner.service —— Python Runner 作业服务（doc/01 §6 部署形态）
+#
+# ⚠️ 与 PM2（colab_cli/ecosystem.config.cjs，见 doc/08-PM2部署.md）**二选一**：
+# 同时拉起会有两个 Runner 抢 8765 端口和 CLI 状态文件。用 PM2 就先
+#   sudo systemctl disable --now colab-runner
+#
+# 安装：
+#   sudo cp colab_runner/colab-runner.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now colab-runner
+#
+# 日志轮转说明：本 unit 走 journald（默认 StandardOutput=journal），
+# 轮转由 journald 自身负责 —— /etc/systemd/journald.conf 的
+# SystemMaxUse / MaxFileSec，例如：
+#   SystemMaxUse=500M
+#   MaxFileSec=1week
+# 任务日志的大头不在这里：远端输出落 colab_output/<task_id>/run.log
+# （64 MiB 硬上限，Runner 自动滚动为 run.log.1，doc/02 §2.6）。
+# 若改成 StandardOutput=append:/var/log/colab-runner.log，请改用 logrotate：
+#   /var/log/colab-runner.log { weekly; rotate 4; compress; copytruncate }
+
+[Unit]
+Description=Colab Runner（colab_cli 的 FastAPI 作业服务，127.0.0.1:8765）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际部署路径与 Python 环境修改以下三项
+WorkingDirectory=/backup/code/kaggle-code/colab_cli
+ExecStart=/backup/conda/bin/python3 -m colab_runner
+Restart=on-failure
+RestartSec=3
+
+# 共享密钥（doc/01 §7）：生产环境务必换成强随机值，或用 EnvironmentFile
+Environment=COLAB_RUNNER_TOKEN=change-me
+# 每 session 一个 CLI 状态文件（doc/06 §3.2：并发任务不写同一个状态文件）
+Environment=COLAB_CLI_STATE_DIR=/var/lib/colab-runner/cli-state
+# Environment=COLAB_TRANSPORT=native        # native（默认）| cli（降级通道）
+# Environment=COLAB_OUTPUT_DIR=/srv/colab_output
+
+[Install]
+WantedBy=multi-user.target

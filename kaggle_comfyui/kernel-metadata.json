@@ -1,0 +1,15 @@
+{
+  "id": "YOUR_USERNAME/wan22-animate-comfyui",
+  "title": "wan22-animate-comfyui",
+  "code_file": "kernel.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": ["YOUR_USERNAME/YOUR_DATASET"],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "category_ids": []
+}

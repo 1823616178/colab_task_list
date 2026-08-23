@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────────────────────
+# 凭据：绝对不能进库。仓库是公开的。
+# ─────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+kaggle.json
+access_token
+.netrc
+# gcloud ADC（doc/01 §6 明确要求不打进镜像/版本库）
+application_default_credentials.json
+
+# ─────────────────────────────────────────────────────────────
+# 构建产物。⚠️ .nuxt/ 与 .output/ 会把构建时的 .env 明文内联进
+# nitro.mjs（见 colab_cli/web/README.md），泄密路径不止 .env 本身。
+# ─────────────────────────────────────────────────────────────
+node_modules/
+.nuxt/
+.output/
+dist/
+build/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ─────────────────────────────────────────────────────────────
+# 运行时数据与产物（不是源码，且体积大）
+# ─────────────────────────────────────────────────────────────
+colab_cli/colab_output/
+colab_cli/colab_output_dev/
+colab_cli/runner_state.json
+# PM2 服务日志（doc/08），保留目录说明本身
+colab_cli/logs/*
+!colab_cli/logs/README.md
+*.log
+
+# 任务运行记录（含 prompt/输出内容，按需自行保留）
+demo/benchmarks/*.run.json
+
+# ─────────────────────────────────────────────────────────────
+# 工作流的输入/输出媒体：个人素材，不进公开库。
+# clone 之后自己放对应文件即可（路径见 colab_cli/README.md）。
+# ─────────────────────────────────────────────────────────────
+colab_cli/image/
+colab_cli/video/
+# dry_run fixture 里那张 3.7MB 输入图同理；同目录的小文件
+# （events_dry_run.jsonl / api.json / workflow.json / output.zip）保留，
+# 它们是回放测试要用的（doc/05 P0.4）
+colab_cli/tests/fixtures/dry_run_output/*/inputs/
+
+# 大体积媒体兜底
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.safetensors
+*.ckpt
+*.pth
+
+# ─────────────────────────────────────────────────────────────
+# 编辑器 / 系统
+# ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

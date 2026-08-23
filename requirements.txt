@@ -1,0 +1,8 @@
+numpy==2.3.5
+pandas==2.3.3
+kaggle==2.2.4
+kagglehub==1.0.2
+kaggle-benchmarks==0.6.1
+protobuf==5.29.6
+jupyter==1.1.1
+nbconvert==7.16.6

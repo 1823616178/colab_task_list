@@ -1,0 +1,16 @@
+# doc/06 §2 要求的隔离项
+web/node_modules/
+web/.nuxt/
+web/.output/
+colab_output_dev/
+runner_state.json
+.env
+
+# PM2 服务日志（doc/08）：保留目录与说明，不收日志本体
+logs/*
+!logs/README.md
+
+# Python
+__pycache__/
+.pytest_cache/
+.ruff_cache/

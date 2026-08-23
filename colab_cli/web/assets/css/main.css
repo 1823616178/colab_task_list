@@ -1,0 +1,246 @@
+/* 全局基础样式与设计 token。组件/页面样式一律写在各自 .vue 的 \3c style> 中
+   （禁用 scoped，doc/04 §1.3），类名遵循 container_页面_功能_位置_别名（doc/04 §1.1）。
+
+   本文件是全站唯一允许出现色值字面量的地方（doc/07 §4 阶段 1）。
+   页面里写 var(--c-*)，不写 hex —— 改主色/圆角/间距只改这里。 */
+
+:root {
+  /* ── 主色（沿用 Arco 蓝，只是给了名字） ── */
+  --c-brand: #165dff;
+  --c-brand-hover: #4080ff;
+  --c-brand-active: #0e42d2;
+  --c-brand-bg: #f0f6ff;
+
+  /* ── 中性 ── */
+  --c-text: #1d2129;
+  --c-text-invert: #fff;
+  --c-text-sub: #4e5969;
+  --c-text-weak: #86909c;
+  --c-border: #e5e6eb;
+  --c-border-strong: #c9cdd4;
+  --c-divider: #f0f0f0;
+  --c-bg: #f5f6f7;
+  --c-surface: #fff;
+  --c-surface-sub: #fafbfc;
+  --c-surface-hover: #f7f8fa;
+
+  /* 日志面板（深色，唯一的反色区域） */
+  --c-log-bg: #1d2129;
+  --c-log-text: #c9cdd4;
+  --c-log-lineno: #6b7280;
+
+  /* ── 状态语义：全站唯一定义 ──
+     running / succeeded / failed / recoverable / orphaned 五态，
+     页面的 [data-status] 规则一律引这里，不再各写一份（doc/07 §1.1）。 */
+  --c-running: #165dff;
+  --c-running-bg: #f0f6ff;
+  --c-success: #16803c;
+  --c-success-bg: #e8f7ed;
+  --c-danger: #d03050;
+  --c-danger-hover: #a1152f;
+  --c-danger-bg: #ffece8;
+  --c-warn: #ff7d00;
+  --c-warn-text: #b25000;
+  --c-warn-bg: #fff3e0;
+  --c-warn-border: #ffb65c;
+
+  /* ── 字阶：原九档收敛到六档 ── */
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 24px;
+
+  /* ── 间距：4 的倍数 ── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* ── 圆角：控件 4 / 容器 8 两档 ── */
+  --r-sm: 4px;
+  --r-md: 8px;
+
+  /* ── 阴影 ── */
+  --sh-1: 0 1px 2px rgb(0 0 0 / 4%);
+  --sh-2: 0 2px 8px rgb(0 0 0 / 8%);
+  --sh-3: 0 4px 16px rgb(0 0 0 / 12%);
+
+  /* ── 动效（prefers-reduced-motion 下由文末统一关闭） ── */
+  --t-fast: 120ms ease;
+  --t-base: 200ms ease;
+
+  /* ── 字体栈 ── */
+  --ff-base:
+    system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei',
+    'Helvetica Neue', arial, sans-serif;
+  --ff-mono: ui-monospace, sfmono-regular, menlo, consolas, monospace;
+
+  /* ── 布局容器宽度：原 960/1200/640 三种收敛成两种 ── */
+  --w-page: 1200px;
+  --w-form: 640px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--ff-base);
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  color: var(--c-text);
+  background: var(--c-bg);
+}
+
+/* ────────────────────────────────────────────────────────────────
+   元素级基础样式（doc/07 §4 阶段 2）
+
+   全部用裸元素选择器，不带 class —— 因为 doc/04 §1.4 的命名规则把页面段
+   枚举死了（dash|task|workflow|session|user|login），写不出跨页共享的类名。
+   元素选择器特异度只有 (0,0,1)，页面里任何 container_* 类都能盖过它，
+   所以这里只设「最弱的合理默认」，页面需要特例时照常自己写。
+   ──────────────────────────────────────────────────────────────── */
+
+/* 键盘焦点环：改造前全站 0 处 :focus / outline 规则（doc/07 §1） */
+:focus-visible {
+  outline: 2px solid var(--c-brand);
+  outline-offset: 2px;
+}
+
+/* 默认按钮 = 次级按钮外观（原先在 9 个文件里逐字重复） */
+button {
+  padding: 6px 14px;
+  font: inherit;
+  color: var(--c-text);
+  cursor: pointer;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  transition: filter var(--t-fast);
+}
+
+/* hover/active 用 filter 而不是改 color/background —— 关键取舍：
+   `button:hover:not(:disabled)` 特异度是 (0,2,1)，会盖过页面里的
+   `.container_xxx:hover` (0,2,0)。若基线在 hover 时写死品牌色，
+   页面上那些实心的危险按钮（停止/删除，红底白字）hover 时会被强行改成蓝色。
+   filter 对描边按钮和实心按钮同时成立，且不与任何页面配色冲突。 */
+button:hover:not(:disabled) {
+  filter: brightness(0.95);
+}
+
+button:active:not(:disabled) {
+  filter: brightness(0.9);
+}
+
+/* 原先各页面 opacity 在 .5 / .6 之间摇摆，统一到 .6 */
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  transition: border-color var(--t-fast);
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--c-brand-hover);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+  background: var(--c-surface-sub);
+  opacity: 0.7;
+}
+
+/* 复选框/单选框不该套上面那身边框与内边距 */
+input[type='checkbox'],
+input[type='radio'] {
+  padding: 0;
+  cursor: pointer;
+  border: none;
+  accent-color: var(--c-brand);
+}
+
+a {
+  color: var(--c-brand);
+  text-decoration: none;
+  transition: color var(--t-fast);
+}
+
+a:hover {
+  color: var(--c-brand-hover);
+}
+
+/* 表格骨架（原先在 5 个列表页各抄一遍） */
+table {
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 10px var(--sp-3);
+  text-align: left;
+}
+
+th {
+  font-weight: 500;
+  color: var(--c-text-sub);
+  background: var(--c-surface-sub);
+  border-bottom: 1px solid var(--c-border);
+}
+
+td {
+  border-bottom: 1px solid var(--c-divider);
+}
+
+/* 行 hover 落在 <tr> 上而不是 <td> 上，是为了让位给状态底色：
+   页面里的 `.container_xxx_row_item[data-status='recoverable']` 特异度 (0,2,0)
+   高于这条 (0,0,2)，可恢复任务的琥珀底色不会被 hover 抹掉 —— 那正是全站
+   最需要一眼认出的状态（doc/07 §1.1）。 */
+tbody tr:hover {
+  background: var(--c-surface-hover);
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--ff-mono);
+}
+
+/* 表格里的数字/时间/体积列等宽对齐 —— 任务列表、耗时、GiB 全受益 */
+td,
+time {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 前庭功能障碍 / 系统降低动效偏好：一刀切关掉所有过渡与动画。
+   放在文件末尾，确保能盖住上面所有 transition 与页面里的 animation。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

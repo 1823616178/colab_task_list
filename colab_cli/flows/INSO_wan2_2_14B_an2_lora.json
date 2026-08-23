@@ -1,0 +1,918 @@
+{
+  "1": {
+    "inputs": {
+      "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+      "clip": [
+        "494",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "4": {
+    "inputs": {
+      "clip_name": "clip_vision_h.safetensors"
+    },
+    "class_type": "CLIPVisionLoader",
+    "_meta": {
+      "title": "加载CLIP视觉"
+    }
+  },
+  "9": {
+    "inputs": {
+      "crop": "none",
+      "clip_vision": [
+        "4",
+        0
+      ],
+      "image": [
+        "431",
+        0
+      ]
+    },
+    "class_type": "CLIPVisionEncode",
+    "_meta": {
+      "title": "CLIP视觉编码"
+    }
+  },
+  "21": {
+    "inputs": {
+      "text": "a nude girl dancing, she is complete nude,showing her big perky breasts and innie vagina.Exposed genitals.",
+      "clip": [
+        "494",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "60": {
+    "inputs": {
+      "shift": 8,
+      "model": [
+        "542",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "采样算法（SD3）"
+    }
+  },
+  "100": {
+    "inputs": {
+      "detect_hand": "disable",
+      "detect_body": "disable",
+      "detect_face": "enable",
+      "resolution": [
+        "158",
+        0
+      ],
+      "bbox_detector": "yolox_l.torchscript.pt",
+      "pose_estimator": "dw-ll_ucoco_384_bs5.torchscript.pt",
+      "scale_stick_for_xinsr_cn": "disable",
+      "image": [
+        "471",
+        0
+      ]
+    },
+    "class_type": "DWPreprocessor",
+    "_meta": {
+      "title": "DWPose Estimator"
+    }
+  },
+  "101": {
+    "inputs": {
+      "detect_hand": "enable",
+      "detect_body": "enable",
+      "detect_face": "disable",
+      "resolution": [
+        "158",
+        0
+      ],
+      "bbox_detector": "yolox_l.torchscript.pt",
+      "pose_estimator": "dw-ll_ucoco_384_bs5.torchscript.pt",
+      "scale_stick_for_xinsr_cn": "disable",
+      "image": [
+        "471",
+        0
+      ]
+    },
+    "class_type": "DWPreprocessor",
+    "_meta": {
+      "title": "DWPose Estimator"
+    }
+  },
+  "158": {
+    "inputs": {
+      "image_gen_width": [
+        "471",
+        1
+      ],
+      "image_gen_height": [
+        "471",
+        2
+      ],
+      "resize_mode": "Just Resize",
+      "original_image": [
+        "351",
+        0
+      ]
+    },
+    "class_type": "PixelPerfectResolution",
+    "_meta": {
+      "title": "Pixel Perfect Resolution"
+    }
+  },
+  "279": {
+    "inputs": {
+      "value": -1034604152977692
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Seed"
+    }
+  },
+  "285": {
+    "inputs": {
+      "sage_attention": "disabled",
+      "allow_compile": false,
+      "model": [
+        "530",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ"
+    }
+  },
+  "319": {
+    "inputs": {
+      "block_size": 12,
+      "device": "gpu",
+      "masks": [
+        "447",
+        0
+      ]
+    },
+    "class_type": "BlockifyMask",
+    "_meta": {
+      "title": "Blockify Mask"
+    }
+  },
+  "340": {
+    "inputs": {
+      "width": [
+        "471",
+        1
+      ],
+      "height": [
+        "471",
+        2
+      ],
+      "length": [
+        "351",
+        1
+      ],
+      "batch_size": 1,
+      "continue_motion_max_frames": 5,
+      "video_frame_offset": 0,
+      "positive": [
+        "21",
+        0
+      ],
+      "negative": [
+        "1",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "clip_vision_output": [
+        "9",
+        0
+      ],
+      "reference_image": [
+        "431",
+        0
+      ],
+      "face_video": [
+        "100",
+        0
+      ],
+      "pose_video": [
+        "101",
+        0
+      ],
+      "background_video": [
+        "516",
+        0
+      ],
+      "character_mask": [
+        "319",
+        0
+      ]
+    },
+    "class_type": "WanAnimateToVideo",
+    "_meta": {
+      "title": "Wan动画转视频"
+    }
+  },
+  "341": {
+    "inputs": {
+      "seed": [
+        "279",
+        0
+      ],
+      "steps": 30,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "60",
+        0
+      ],
+      "positive": [
+        "340",
+        0
+      ],
+      "negative": [
+        "340",
+        1
+      ],
+      "latent_image": [
+        "525",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "⚡K采样器⚡"
+    }
+  },
+  "342": {
+    "inputs": {
+      "trim_amount": [
+        "340",
+        3
+      ],
+      "samples": [
+        "341",
+        0
+      ]
+    },
+    "class_type": "TrimVideoLatent",
+    "_meta": {
+      "title": "修剪视频Latent"
+    }
+  },
+  "343": {
+    "inputs": {
+      "samples": [
+        "517",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "346": {
+    "inputs": {
+      "direction": "right",
+      "match_image_size": true,
+      "image1": [
+        "491",
+        0
+      ],
+      "image2": [
+        "351",
+        0
+      ]
+    },
+    "class_type": "ImageConcanate",
+    "_meta": {
+      "title": "Image Concatenate (Swwan)"
+    }
+  },
+  "348": {
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "AnimateDiff",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 16,
+      "save_metadata": false,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "346",
+        0
+      ],
+      "audio": [
+        "351",
+        2
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "对比视频"
+    }
+  },
+  "351": {
+    "inputs": {
+      "video": "打败敌人后要说一声对不起Lolita话题_走拍话题_转生小猫日记话题_女仆装话题.mp4",
+      "force_rate": 16,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 37,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "Wan"
+    },
+    "class_type": "VHS_LoadVideo",
+    "_meta": {
+      "title": "源视频"
+    }
+  },
+  "387": {
+    "inputs": {
+      "Hat": false,
+      "Hair": false,
+      "Face": false,
+      "Sunglasses": false,
+      "Upper-clothes": true,
+      "Skirt": true,
+      "Dress": true,
+      "Belt": true,
+      "Pants": true,
+      "Left-arm": false,
+      "Right-arm": false,
+      "Left-leg": false,
+      "Right-leg": false,
+      "Bag": false,
+      "Scarf": false,
+      "Left-shoe": false,
+      "Right-shoe": false,
+      "Background": false,
+      "process_res": 512,
+      "mask_blur": 0,
+      "mask_offset": 0,
+      "invert_output": false,
+      "background": "Alpha",
+      "background_color": "#000000",
+      "images": [
+        "471",
+        0
+      ]
+    },
+    "class_type": "ClothesSegment",
+    "_meta": {
+      "title": "衣物分割 (RMBG)"
+    }
+  },
+  "388": {
+    "inputs": {
+      "expand": 10,
+      "tapered_corners": true,
+      "mask": [
+        "387",
+        1
+      ]
+    },
+    "class_type": "GrowMask",
+    "_meta": {
+      "title": "扩展遮罩"
+    }
+  },
+  "389": {
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "AnimateDiff",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": false,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": false,
+      "images": [
+        "516",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "遮罩预览"
+    }
+  },
+  "394": {
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "AnimateDiff",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 16,
+      "save_metadata": false,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "491",
+        0
+      ],
+      "audio": [
+        "351",
+        2
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "输出视频"
+    }
+  },
+  "419": {
+    "inputs": {
+      "value": 16
+    },
+    "class_type": "FloatConstant",
+    "_meta": {
+      "title": "Float Constant"
+    }
+  },
+  "431": {
+    "inputs": {
+      "image": "78515578_109_5e22.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "参考图"
+    }
+  },
+  "436": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": true,
+      "anything": [
+        "343",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM",
+    "_meta": {
+      "title": "图层工具：清除VRAM"
+    }
+  },
+  "437": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": true,
+      "anything": [
+        "319",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM",
+    "_meta": {
+      "title": "图层工具：清除VRAM"
+    }
+  },
+  "439": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": true,
+      "anything": [
+        "100",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM",
+    "_meta": {
+      "title": "图层工具：清除VRAM"
+    }
+  },
+  "440": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": true,
+      "anything": [
+        "101",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM",
+    "_meta": {
+      "title": "图层工具：清除VRAM"
+    }
+  },
+  "447": {
+    "inputs": {
+      "any_01": [
+        "388",
+        0
+      ]
+    },
+    "class_type": "Any Switch (rgthree)",
+    "_meta": {
+      "title": "Any Switch (rgthree)"
+    }
+  },
+  "453": {
+    "inputs": {
+      "image": [
+        "471",
+        0
+      ]
+    },
+    "class_type": "ImpactImageBatchToImageList",
+    "_meta": {
+      "title": "Image Batch to Image List"
+    }
+  },
+  "454": {
+    "inputs": {
+      "model_name": "bbox/face_yolov8m.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "UltralyticsDetectorProvider"
+    }
+  },
+  "456": {
+    "inputs": {
+      "segs": [
+        "458",
+        0
+      ]
+    },
+    "class_type": "SegsToCombinedMask",
+    "_meta": {
+      "title": "SEGS to MASK (combined)"
+    }
+  },
+  "457": {
+    "inputs": {
+      "mask": [
+        "456",
+        0
+      ]
+    },
+    "class_type": "MaskListToMaskBatch",
+    "_meta": {
+      "title": "Mask List to Mask Batch"
+    }
+  },
+  "458": {
+    "inputs": {
+      "threshold": 0.5,
+      "dilation": 10,
+      "crop_factor": 3,
+      "drop_size": 10,
+      "labels": "all",
+      "bbox_detector": [
+        "454",
+        0
+      ],
+      "image": [
+        "453",
+        0
+      ]
+    },
+    "class_type": "BboxDetectorSEGS",
+    "_meta": {
+      "title": "BBOX Detector (SEGS)"
+    }
+  },
+  "460": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "destination": [
+        "343",
+        0
+      ],
+      "source": [
+        "471",
+        0
+      ],
+      "mask": [
+        "502",
+        0
+      ]
+    },
+    "class_type": "ImageCompositeMasked",
+    "_meta": {
+      "title": "合成图像（遮罩）"
+    }
+  },
+  "467": {
+    "inputs": {
+      "index": 0,
+      "any": [
+        "351",
+        0
+      ]
+    },
+    "class_type": "easy indexAnything",
+    "_meta": {
+      "title": "任何索引"
+    }
+  },
+  "469": {
+    "inputs": {
+      "size": [
+        "480",
+        0
+      ],
+      "interpolation_mode": "nearest exact",
+      "image": [
+        "467",
+        0
+      ]
+    },
+    "class_type": "JWImageResizeByShorterSide",
+    "_meta": {
+      "title": "Image Resize by Shorter Side"
+    }
+  },
+  "470": {
+    "inputs": {
+      "image": [
+        "469",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "获取图像尺寸"
+    }
+  },
+  "471": {
+    "inputs": {
+      "width": [
+        "475",
+        0
+      ],
+      "height": [
+        "476",
+        0
+      ],
+      "upscale_method": "nearest-exact",
+      "keep_proportion": "crop",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 2,
+      "device": "gpu",
+      "image": [
+        "351",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "Image Resize KJ v2 (Swwan)"
+    }
+  },
+  "475": {
+    "inputs": {
+      "expression": "round(a / 16) * 16",
+      "a": [
+        "470",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Math Expression 🐍"
+    }
+  },
+  "476": {
+    "inputs": {
+      "expression": "round(a / 16) * 16",
+      "a": [
+        "470",
+        1
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Math Expression 🐍"
+    }
+  },
+  "480": {
+    "inputs": {
+      "value": 720
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "输出分辨率"
+    }
+  },
+  "491": {
+    "inputs": {
+      "any_01": [
+        "460",
+        0
+      ],
+      "any_02": [
+        "343",
+        0
+      ]
+    },
+    "class_type": "Any Switch (rgthree)",
+    "_meta": {
+      "title": "Any Switch (rgthree)"
+    }
+  },
+  "494": {
+    "inputs": {
+      "clip_name": "umt5_xxl_fp16.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "502": {
+    "inputs": {
+      "expand": -5,
+      "incremental_expandrate": 0,
+      "tapered_corners": true,
+      "flip_input": false,
+      "blur_radius": 10,
+      "lerp_alpha": 1,
+      "decay_factor": 1,
+      "fill_holes": false,
+      "mask": [
+        "457",
+        0
+      ]
+    },
+    "class_type": "GrowMaskWithBlur",
+    "_meta": {
+      "title": "Grow Mask With Blur"
+    }
+  },
+  "516": {
+    "inputs": {
+      "color": "0, 0, 0",
+      "opacity": 1,
+      "device": "gpu",
+      "image": [
+        "471",
+        0
+      ],
+      "mask": [
+        "319",
+        0
+      ]
+    },
+    "class_type": "DrawMaskOnImage",
+    "_meta": {
+      "title": "Draw Mask On Image (Swwan)"
+    }
+  },
+  "517": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": true,
+      "anything": [
+        "342",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM V2",
+    "_meta": {
+      "title": "图层工具：清除VRAM V2"
+    }
+  },
+  "525": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": true,
+      "anything": [
+        "340",
+        2
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM V2",
+    "_meta": {
+      "title": "图层工具：清除VRAM V2"
+    }
+  },
+  "530": {
+    "inputs": {
+      "unet_name": "wan_animate_2_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器：Wan Animate 2 BF16"
+    }
+  },
+  "534": {
+    "inputs": {
+      "lora_name": "Wan2.2-big.safetensors",
+      "strength_model": 0.7,
+      "strength_clip": 0,
+      "model": [
+        "285",
+        0
+      ],
+      "clip": [
+        "494",
+        0
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "LoRA：Wan2.2 Big（模型 0.70 / CLIP 0）"
+    }
+  },
+  "540": {
+    "inputs": {
+      "lora_name": "WanAnimate_relight_lora_fp16.safetensors",
+      "strength_model": 0.85,
+      "strength_clip": 0,
+      "model": [
+        "534",
+        0
+      ],
+      "clip": [
+        "534",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "LoRA：Relight（模型 0.85 / CLIP 0）"
+    }
+  },
+  "541": {
+    "inputs": {
+      "lora_name": "genitals_helper_v1.0_e219.safetensors",
+      "strength_model": 0.6,
+      "strength_clip": 0,
+      "model": [
+        "540",
+        0
+      ],
+      "clip": [
+        "540",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "LoRA：细节辅助（模型 0.60 / CLIP 0）"
+    }
+  },
+  "542": {
+    "inputs": {
+      "lora_name": "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+      "strength_model": 1,
+      "strength_clip": 0,
+      "model": [
+        "541",
+        0
+      ],
+      "clip": [
+        "541",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "LoRA：LightX2V 蒸馏（模型 1.00 / CLIP 0）"
+    }
+  }
+}

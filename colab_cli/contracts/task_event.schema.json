@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://colab-console.local/contracts/task_event.schema.json",
+  "title": "TaskEvent",
+  "description": "Runner 与 Console 之间唯一的数据契约（见 doc/02-接口契约.md §1）。破坏性变更必须 bump v 字段。",
+  "type": "object",
+  "required": ["v", "task_id", "seq", "ts", "phase", "status", "message"],
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "description": "协议版本，破坏性变更时 +1",
+      "type": "integer",
+      "const": 1
+    },
+    "task_id": {
+      "description": "任务编号：YYYYMMDD-HHMMSS-<uuid4 前 8 位>，UTC（run.py create_task_id 格式）",
+      "type": "string",
+      "pattern": "^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$"
+    },
+    "seq": {
+      "description": "单任务内自增序号，从 0 开始，用于断线续订 from_seq",
+      "type": "integer",
+      "minimum": 0
+    },
+    "ts": {
+      "description": "UTC ISO8601，毫秒精度",
+      "type": "string",
+      "format": "date-time"
+    },
+    "phase": {
+      "description": "任务生命周期阶段（doc/02 §1.2）",
+      "type": "string",
+      "enum": [
+        "task.queued",
+        "task.start",
+        "session.create",
+        "session.reuse",
+        "drive.mount",
+        "input.resolve",
+        "input.upload",
+        "env.setup",
+        "model.prepare",
+        "node.prepare",
+        "comfy.start",
+        "workflow.exec",
+        "output.pack",
+        "output.transfer",
+        "session.stop",
+        "session.keep",
+        "task.done",
+        "task.failed",
+        "task.canceled",
+        "metrics.sample",
+        "log.line"
+      ]
+    },
+    "status": {
+      "description": "start|ok|warn|error 入库；progress 仅 SSE（doc/02 §1.1）",
+      "type": "string",
+      "enum": ["start", "progress", "ok", "warn", "error"]
+    },
+    "message": {
+      "description": "人类可读消息，可直接展示；空串表示由 phase/data 渲染（CLI 不打印）",
+      "type": "string"
+    },
+    "data": {
+      "description": "phase 相关载荷，见 $defs 中各 phase 的载荷定义（doc/02 §1.3）",
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "sessionCreateData": {
+      "type": "object",
+      "description": "session.create / session.reuse",
+      "properties": {
+        "session": { "type": "string" },
+        "accelerator": { "type": "string", "enum": ["gpu", "tpu", "cpu"] },
+        "variant": { "type": "string", "description": "如 A100 / L4 / TPU v6e-1" }
+      },
+      "required": ["session"]
+    },
+    "inputResolveOkData": {
+      "type": "object",
+      "description": "input.resolve (ok)",
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "workflow_path": { "type": "string" },
+              "local_path": { "type": "string" },
+              "remote_path": { "type": "string" }
+            },
+            "required": ["workflow_path", "local_path", "remote_path"]
+          }
+        }
+      },
+      "required": ["files"]
+    },
+    "modelPrepareStartData": {
+      "type": "object",
+      "description": "model.prepare (start) 总览",
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "total_bytes": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["total", "total_bytes"]
+    },
+    "modelPrepareProgressData": {
+      "type": "object",
+      "description": "model.prepare (progress) 单个模型",
+      "properties": {
+        "index": { "type": "integer", "minimum": 1 },
+        "total": { "type": "integer", "minimum": 0 },
+        "repo": { "type": "string" },
+        "filename": { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "source": { "type": "string", "enum": ["drive_cache", "huggingface", "vm_local"] },
+        "action": { "type": "string", "enum": ["symlink", "copy", "download"] },
+        "done_bytes": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["index", "total", "filename"]
+    },
+    "workflowExecProgressData": {
+      "type": "object",
+      "description": "workflow.exec (progress)",
+      "properties": {
+        "prompt_id": { "type": "string" },
+        "node": { "type": "string" },
+        "step": { "type": "integer" },
+        "steps": { "type": "integer" },
+        "percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "completed_nodes": { "type": "integer", "minimum": 0 },
+        "total_nodes": { "type": "integer", "minimum": 0 },
+        "current_node": { "type": "string" }
+      }
+    },
+    "outputPackOkData": {
+      "type": "object",
+      "description": "output.pack (ok)",
+      "properties": {
+        "archive_size": { "type": "integer", "minimum": 0 },
+        "archive_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
+        "parts": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["archive_size", "archive_sha256", "parts"]
+    },
+    "outputTransferProgressData": {
+      "type": "object",
+      "description": "output.transfer (progress)",
+      "properties": {
+        "part": { "type": "integer", "minimum": 1 },
+        "parts": { "type": "integer", "minimum": 1 },
+        "part_name": { "type": "string" },
+        "transport": { "type": "string", "enum": ["native", "cli"] }
+      },
+      "required": ["part", "parts"]
+    },
+    "outputTransferOkData": {
+      "type": "object",
+      "description": "output.transfer (ok)",
+      "properties": {
+        "local_path": { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
+        "verified": { "type": "boolean" }
+      },
+      "required": ["local_path", "size_bytes", "sha256", "verified"]
+    },
+    "metricsSampleData": {
+      "type": "object",
+      "description": "metrics.sample，仅 SSE 永不入库",
+      "properties": {
+        "gpu_util": { "type": "number" },
+        "gpu_util_avg30": { "type": "number" },
+        "gpu_util_peak": { "type": "number" },
+        "gpu_name": { "type": "string" },
+        "vram_used_mb": { "type": "number" },
+        "vram_total_mb": { "type": "number" },
+        "ram_used_mb": { "type": "number" },
+        "ram_total_mb": { "type": "number" },
+        "cpu_percent": { "type": "number" },
+        "elapsed_seconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "logLineData": {
+      "type": "object",
+      "description": "log.line，仅 SSE，落 run.log",
+      "properties": {
+        "stream": { "type": "string", "enum": ["stdout", "stderr"] },
+        "text": { "type": "string" }
+      },
+      "required": ["stream", "text"]
+    },
+    "warnData": {
+      "type": "object",
+      "description": "任意 status=warn（降级/重试）",
+      "properties": {
+        "reason": { "type": "string" },
+        "fallback": { "type": "string" },
+        "attempt": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["reason"]
+    },
+    "taskFailedData": {
+      "type": "object",
+      "description": "task.failed 终态",
+      "properties": {
+        "error_type": { "type": "string" },
+        "message": { "type": "string" },
+        "session_kept": { "type": "boolean" },
+        "recovery_hint": { "type": "string" }
+      },
+      "required": ["error_type", "message", "session_kept"]
+    }
+  }
+}

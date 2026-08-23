@@ -1,0 +1,9 @@
+# google-colab-cli 钉死版本（doc/01 §5 R1）：native 通道覆写了其私有方法
+# ContentsClient._request / 依赖 ColabRuntime.kernel_client，上游重构即失效。
+# 禁止使用 >=。升级前必须人工验证 colab_transport.probe_private_api()。
+google-colab-cli==0.6.0
+
+# P1 Runner 服务（colab_runner）：FastAPI + uvicorn 单 worker（doc/05 P1）。
+# 同样钉死版本（禁止 >=），与当前环境实际安装版本一致。
+fastapi==0.141.1
+uvicorn==0.52.4

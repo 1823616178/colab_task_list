@@ -1,0 +1,136 @@
+{
+  "name": "INSO Wan Animate 2 BF16（原生 LoRA 串联）",
+  "api_json": "../flows/INSO_wan2_2_14B_an2_lora.json",
+  "supported_accelerators": [
+    "gpu"
+  ],
+  "accelerator_note": "该流程使用约 32.8GB 的 BF16 UNET、4 个 LoRA 和多个 CUDA 节点，仅支持 GPU，建议使用 A100 40GB/H100；如显存不足会进行模型卸载并明显变慢。",
+  "input_fields": [
+    {
+      "class_type": "VHS_LoadVideo",
+      "field": "video",
+      "local_dir": "../video"
+    },
+    {
+      "class_type": "LoadImage",
+      "field": "image",
+      "local_dir": "../image"
+    }
+  ],
+  "comfy_flags": [
+    "--reserve-vram",
+    "2"
+  ],
+  "custom_nodes": [
+    {
+      "name": "ComfyUI-KJNodes",
+      "repo": "https://github.com/kijai/ComfyUI-KJNodes.git"
+    },
+    {
+      "name": "comfyui_controlnet_aux",
+      "repo": "https://github.com/Fannovel16/comfyui_controlnet_aux.git"
+    },
+    {
+      "name": "ComfyUI-VideoHelperSuite",
+      "repo": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git"
+    },
+    {
+      "name": "rgthree-comfy",
+      "repo": "https://github.com/rgthree/rgthree-comfy.git"
+    },
+    {
+      "name": "ComfyUI-RMBG",
+      "repo": "https://github.com/1038lab/ComfyUI-RMBG.git"
+    },
+    {
+      "name": "ComfyUI-Impact-Pack",
+      "repo": "https://github.com/ltdrdata/ComfyUI-Impact-Pack.git",
+      "install_scripts": [
+        "install.py"
+      ]
+    },
+    {
+      "name": "ComfyUI-Impact-Subpack",
+      "repo": "https://github.com/ltdrdata/ComfyUI-Impact-Subpack.git"
+    },
+    {
+      "name": "ComfyUI-Easy-Use",
+      "repo": "https://github.com/yolain/ComfyUI-Easy-Use.git"
+    },
+    {
+      "name": "ComfyUI-Custom-Scripts",
+      "repo": "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
+    },
+    {
+      "name": "comfyui-various",
+      "repo": "https://github.com/jamesWalker55/comfyui-various.git"
+    },
+    {
+      "name": "ComfyUI_LayerStyle",
+      "repo": "https://github.com/chflame163/ComfyUI_LayerStyle.git"
+    }
+  ],
+  "models": [
+    {
+      "repo": "Comfy-Org/Wan-Animate-2",
+      "filename": "diffusion_models/wan_animate_2_bf16.safetensors",
+      "comfy_dir": "diffusion_models",
+      "cache_path": "diffusion_models/wan_animate_2_bf16.safetensors",
+      "size_bytes": 32789894104
+    },
+    {
+      "repo": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+      "filename": "split_files/text_encoders/umt5_xxl_fp16.safetensors",
+      "comfy_dir": "text_encoders",
+      "cache_path": "text_encoders/umt5_xxl_fp16.safetensors",
+      "size_bytes": 11366399385
+    },
+    {
+      "repo": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+      "filename": "split_files/vae/wan_2.1_vae.safetensors",
+      "comfy_dir": "vae",
+      "cache_path": "vae/wan_2.1_vae.safetensors",
+      "size_bytes": 253815318
+    },
+    {
+      "repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+      "filename": "split_files/clip_vision/clip_vision_h.safetensors",
+      "comfy_dir": "clip_vision",
+      "cache_path": "clip_vision/clip_vision_h.safetensors",
+      "size_bytes": 1264219396
+    },
+    {
+      "filename": "Wan2.2-big.safetensors",
+      "comfy_dir": "loras",
+      "cache_path": "loras/Wan2.2-big.safetensors"
+    },
+    {
+      "repo": "Kijai/WanVideo_comfy",
+      "filename": "LoRAs/Wan22_relight/WanAnimate_relight_lora_fp16.safetensors",
+      "comfy_dir": "loras",
+      "cache_path": "loras/WanAnimate_relight_lora_fp16.safetensors",
+      "size_bytes": 1436672440
+    },
+    {
+      "repo": "DAKARA555/genitals_helper_v1.0_e219",
+      "filename": "genitals_helper_v1.0_e219.safetensors",
+      "comfy_dir": "loras",
+      "cache_path": "loras/genitals_helper_v1.0_e219.safetensors",
+      "size_bytes": 306807976
+    },
+    {
+      "repo": "Kijai/WanVideo_comfy",
+      "filename": "Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+      "comfy_dir": "loras",
+      "cache_path": "loras/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+      "size_bytes": 738005744
+    },
+    {
+      "repo": "Bingsu/adetailer",
+      "filename": "face_yolov8m.pt",
+      "comfy_dir": "ultralytics/bbox",
+      "cache_path": "ultralytics/bbox/face_yolov8m.pt",
+      "size_bytes": 52026019
+    }
+  ]
+}
