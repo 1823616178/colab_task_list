@@ -4,21 +4,23 @@
 改动会以 unified diff + 改后文件的形式写进输出目录, 随 run 产物打包下载。
 
 ⚠ 必须单文件自包含: kaggle b t push 只推这一个 .py 并转成 notebook,
-  云端不存在兄弟模块可以 import, 所以配置只能是下面的常量块。
+  云端不存在兄弟模块可以 import。动态提示词通过 Dataset 中的 codegen-job.json 传入。
 """
 
 import difflib
+import json
 import os
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import kaggle_benchmarks as kbench
 from kaggle_benchmarks.tools.base import ToolInvocationLimitExhausted
 from kaggle_benchmarks.tools.native import native_tool_agent
 
-# ==== 配置区: 换任务只改这里 ================================================
+# ==== 默认配置: 命令行未传提示词时使用 ======================================
 
 # 仓库目录名。云端在 /kaggle/input/<dataset>/ 下按这个名字找; 本地用 CODEGEN_REPO_PATH。
 REPO_NAME = "example_repo"
@@ -38,6 +40,7 @@ VERIFY_COMMAND = [sys.executable, "-m", "pytest", "-q"]
 # 模型不允许修改的路径前缀(相对仓库根), 防止它改测试来蒙混过关。
 PROTECTED_PREFIXES = ("tests/", "pytest.ini")
 
+CODEGEN_JOB_FILE = "codegen-job.json"
 MAX_TOOL_ROUNDS = 16
 MAX_FILE_BYTES = 60_000
 VERIFY_TIMEOUT_SECONDS = 300
@@ -75,6 +78,22 @@ def locate_repository() -> Path:
 
     kaggle_input = Path("/kaggle/input")
     if kaggle_input.is_dir():
+        # Kaggle CLI 的 dataset --dir-mode zip 会把仓库目录上传成同名 ZIP。
+        # 解到 /tmp，避免输入副本混进 /kaggle/working 的下载产物。
+        for archive in sorted(kaggle_input.rglob(f"{REPO_NAME}.zip")):
+            extracted = Path("/tmp/cloud_codegen_input") / REPO_NAME
+            if extracted.exists():
+                shutil.rmtree(extracted)
+            extracted.mkdir(parents=True)
+            with zipfile.ZipFile(archive) as bundle:
+                destination = extracted.resolve()
+                for member in bundle.infolist():
+                    target = (destination / member.filename).resolve()
+                    if not target.is_relative_to(destination):
+                        raise ValueError(f"仓库压缩包包含越界路径: {member.filename}")
+                bundle.extractall(destination)
+            return extracted
+
         for candidate in sorted(kaggle_input.rglob(REPO_NAME)):
             if candidate.is_dir():
                 return candidate
@@ -87,6 +106,37 @@ def locate_repository() -> Path:
     if fallback.is_dir():
         return fallback
     raise FileNotFoundError(f"找不到仓库 {REPO_NAME}, 请设置 CODEGEN_REPO_PATH")
+
+
+def load_spec(kaggle_input: Path | None = None) -> str:
+    """取提示词: 本地环境变量优先，其次云端 Dataset，最后使用内置 SPEC。"""
+    override = os.environ.get("CODEGEN_PROMPT")
+    if override is not None:
+        prompt = override.strip()
+        if not prompt:
+            raise ValueError("CODEGEN_PROMPT 不能为空")
+        return prompt
+
+    kaggle_input = kaggle_input or Path("/kaggle/input")
+    if not kaggle_input.is_dir():
+        return SPEC
+
+    job_files = sorted(kaggle_input.rglob(CODEGEN_JOB_FILE))
+    if not job_files:
+        return SPEC
+    if len(job_files) > 1:
+        raise RuntimeError(
+            f"找到多个 {CODEGEN_JOB_FILE}: "
+            + ", ".join(str(path) for path in job_files)
+        )
+    try:
+        payload = json.loads(job_files[0].read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"读取云端任务配置失败: {job_files[0]}: {error}") from error
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError(f"{job_files[0]} 缺少非空字符串 prompt")
+    return prompt.strip()
 
 
 def prepare_workspace(repository: Path) -> dict[str, str]:
@@ -228,8 +278,10 @@ def repo_codegen(llm) -> bool:
     before = execute_verification()
     print(f"改动前验收退出码: {before.returncode}", flush=True)
 
+    task_spec = load_spec()
+    print(f"提示词: {len(task_spec)} 字符", flush=True)
     prompt = (
-        f"{SPEC}\n"
+        f"{task_spec}\n"
         "你可以用提供的工具查看和修改仓库文件, 并随时运行验收命令检查结果。\n"
         "请一直改到验收命令退出码为 0 为止, 然后简短说明你改了什么。"
     )

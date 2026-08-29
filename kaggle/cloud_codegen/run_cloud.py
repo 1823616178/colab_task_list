@@ -11,24 +11,54 @@ import os
 import shutil
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+TASK_DIRECTORY = HERE / "tasks"
+RUNS_DIRECTORY = HERE / "runs"
 DEFAULT_MODEL = "anthropic/claude-sonnet-5@default"
+CODEGEN_JOB_FILE = "codegen-job.json"
 # kaggle_benchmarks 自己会补 /openapi, 这里要给不带后缀的原始地址。
 OPENAI_PATH_SUFFIX = "/openapi"
 
-# 两个任务: repo 是仓库改造(带工具的 agent), codegen 是单函数生成。
+# 三个任务: repo 是仓库改造，spec/codegen 是固定场景示例。
 TASKS = {
-    "repo": ("repo-codegen", HERE / "repo_task.py"),
-    "codegen": ("cloud-codegen", HERE / "codegen_task.py"),
+    "repo": ("repo-codegen", TASK_DIRECTORY / "repo_task.py"),
+    "spec": ("spec-codegen", TASK_DIRECTORY / "spec_task.py"),
+    "codegen": ("cloud-codegen", TASK_DIRECTORY / "codegen_task.py"),
 }
 
 
 def task_of(args: argparse.Namespace) -> tuple[str, Path]:
     """取出当前选中的任务 slug 与源文件。"""
     return TASKS[args.task]
+
+
+def prompt_of(args: argparse.Namespace) -> str | None:
+    """读取命令行提示词；未指定时返回 None，让任务使用内置 SPEC。"""
+    prompt_file = getattr(args, "prompt_file", None)
+    prompt = getattr(args, "prompt", None)
+    if prompt_file:
+        path = Path(prompt_file).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"提示词文件不存在: {path}")
+        try:
+            prompt = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise ValueError(f"读取提示词文件失败: {path}: {error}") from error
+    if prompt is None:
+        return None
+    prompt = prompt.strip()
+    if not prompt:
+        raise ValueError("提示词不能为空")
+    return prompt
+
+
+def add_prompt_arguments(parser: argparse.ArgumentParser) -> None:
+    """给子命令添加互斥的短提示词和提示词文件参数。"""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-p", "--prompt", default=None, help="repo 任务的短提示词")
+    group.add_argument("--prompt-file", default=None, help="UTF-8 多行提示词文件")
 
 
 def build_proxy_environment() -> dict[str, str]:
@@ -57,6 +87,15 @@ def kaggle_command(arguments: list[str]) -> int:
 
 def command_local(args: argparse.Namespace) -> int:
     """在本地跑任务(算力是自己的, 只花模型额度), 用于 push 前调通。"""
+    try:
+        prompt = prompt_of(args)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
+    if prompt is not None and args.task != "repo":
+        print("--prompt/--prompt-file 目前只支持 repo 任务", file=sys.stderr)
+        return 1
+
     _, task_file = task_of(args)
     environment = dict(os.environ)
     environment.update(build_proxy_environment())
@@ -64,6 +103,10 @@ def command_local(args: argparse.Namespace) -> int:
         environment["LLM_DEFAULT"] = args.model
     if args.repo:
         environment["CODEGEN_REPO_PATH"] = str(Path(args.repo).resolve())
+    if args.spec:
+        environment["SPEC_PATH"] = str(Path(args.spec).resolve())
+    if prompt is not None:
+        environment["CODEGEN_PROMPT"] = prompt
 
     work_directory = Path(args.output).resolve()
     work_directory.mkdir(parents=True, exist_ok=True)
@@ -77,9 +120,25 @@ def command_local(args: argparse.Namespace) -> int:
 
 def command_dataset(args: argparse.Namespace) -> int:
     """把仓库打包成 Kaggle 私有数据集, 供云端任务通过 -d 挂载。"""
+    try:
+        prompt = prompt_of(args)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
+    if prompt is not None and args.task != "repo":
+        print("--prompt/--prompt-file 目前只支持 repo 任务", file=sys.stderr)
+        return 1
+
     repository = Path(args.repo).resolve()
     if not repository.is_dir():
         print(f"仓库目录不存在: {repository}", file=sys.stderr)
+        if str(repository).startswith("/kaggle/input"):
+            print(
+                "  /kaggle/input/... 是云端运行时的挂载路径, 本机没有这个目录。\n"
+                "  dataset 命令是把【本地】目录上传成数据集; 数据集建好后直接用:\n"
+                "    python run_cloud.py push -d <owner>/<slug>",
+                file=sys.stderr,
+            )
         return 1
 
     owner = args.owner or subprocess.run(
@@ -96,6 +155,13 @@ def command_dataset(args: argparse.Namespace) -> int:
 
     slug = args.slug or repository.name.replace("_", "-")
     staging = Path(args.staging).resolve()
+    if (
+        staging == repository
+        or staging in repository.parents
+        or repository in staging.parents
+    ):
+        print("--staging 不能与仓库目录重叠", file=sys.stderr)
+        return 1
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
@@ -108,6 +174,11 @@ def command_dataset(args: argparse.Namespace) -> int:
         json.dumps({"title": slug, "id": f"{owner}/{slug}", "licenses": [{"name": "CC0-1.0"}]},
                    indent=2)
     )
+    if prompt is not None:
+        (staging / CODEGEN_JOB_FILE).write_text(
+            json.dumps({"prompt": prompt}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     print(f"⚠ 这会把 {repository} 的内容上传到 Kaggle(私有数据集 {owner}/{slug})。")
     if not args.yes:
@@ -117,6 +188,8 @@ def command_dataset(args: argparse.Namespace) -> int:
 
     action = ["datasets", "version", "-p", str(staging), "-m", args.message] if args.update \
         else ["datasets", "create", "-p", str(staging)]
+    # Kaggle CLI 默认跳过子目录。用 zip 模式上传，repo_task 会在云端解包。
+    action += ["--dir-mode", "zip"]
     exit_code = kaggle_command(action)
     if exit_code == 0:
         print(f"\n挂载用: python run_cloud.py push -d {owner}/{slug}")
@@ -161,18 +234,13 @@ def command_log(args: argparse.Namespace) -> int:
 
 
 def command_download(args: argparse.Namespace) -> int:
-    """下载 run 产物并解压。"""
+    """下载 run 产物并列出文件；Kaggle CLI 会自行解压输出包。"""
     output = Path(args.output).resolve()
     exit_code = kaggle_command(
-        ["b", "t", "download", task_of(args)[0], "-m", args.model, "-p", str(output)]
+        ["b", "t", "download", task_of(args)[0], "-m", args.model, "-o", str(output)]
     )
     if exit_code != 0:
         return exit_code
-    for archive in sorted(output.rglob("*.zip")):
-        target = archive.with_suffix("")
-        with zipfile.ZipFile(archive) as bundle:
-            bundle.extractall(target)
-        print(f"解压 {archive.name} -> {target}")
     print("\n下载到的文件:")
     for path in sorted(output.rglob("*")):
         if path.is_file():
@@ -190,17 +258,20 @@ def build_parser() -> argparse.ArgumentParser:
     local_parser = subparsers.add_parser("local", help="本地试跑(push 前必做)")
     local_parser.add_argument("-m", "--model", default=None)
     local_parser.add_argument("-r", "--repo", default=None, help="仓库路径(repo 任务用)")
-    local_parser.add_argument("-o", "--output", default="./local_output")
+    local_parser.add_argument("-s", "--spec", default=None, help="契约文档路径(spec 任务用)")
+    local_parser.add_argument("-o", "--output", default=str(RUNS_DIRECTORY / "local"))
+    add_prompt_arguments(local_parser)
     local_parser.set_defaults(handler=command_local)
 
     dataset_parser = subparsers.add_parser("dataset", help="把仓库上传为私有数据集")
     dataset_parser.add_argument("-r", "--repo", required=True)
     dataset_parser.add_argument("--slug", default=None)
     dataset_parser.add_argument("--owner", default=None)
-    dataset_parser.add_argument("--staging", default="./dataset_staging")
+    dataset_parser.add_argument("--staging", default=str(RUNS_DIRECTORY / "dataset-staging"))
     dataset_parser.add_argument("--update", action="store_true", help="更新已存在的数据集")
     dataset_parser.add_argument("-m", "--message", default="update")
     dataset_parser.add_argument("-y", "--yes", action="store_true")
+    add_prompt_arguments(dataset_parser)
     dataset_parser.set_defaults(handler=command_dataset)
 
     push_parser = subparsers.add_parser("push", help="推送任务(永久, 不可删除)")
@@ -223,7 +294,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     download_parser = subparsers.add_parser("download", help="下载并解压产物")
     download_parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
-    download_parser.add_argument("-o", "--output", default="./cloud_output")
+    download_parser.add_argument("-o", "--output", default=str(RUNS_DIRECTORY / "cloud"))
     download_parser.set_defaults(handler=command_download)
 
     return parser

@@ -3,22 +3,21 @@
 不调用模型: 只测任务里那些纯逻辑的部分。
 """
 
-import os
-import shutil
 import sys
 from pathlib import Path
 
 import pytest
 
-CLOUD_CODEGEN_DIR = Path(__file__).resolve().parents[1] / "cloud_codegen"
-EXAMPLE_REPO = CLOUD_CODEGEN_DIR / "example_repo"
+CLOUD_CODEGEN_DIR = Path(__file__).resolve().parents[1]
+TASKS_DIR = CLOUD_CODEGEN_DIR / "tasks"
+EXAMPLE_REPO = CLOUD_CODEGEN_DIR / "examples" / "example_repo"
 
 
 @pytest.fixture
 def task(tmp_path, monkeypatch):
     """加载任务模块并把工作区指到临时目录。"""
     monkeypatch.setenv("CODEGEN_IMPORT_ONLY", "1")
-    monkeypatch.syspath_prepend(str(CLOUD_CODEGEN_DIR))
+    monkeypatch.syspath_prepend(str(TASKS_DIR))
     sys.modules.pop("repo_task", None)
     import repo_task
 
