@@ -16,6 +16,7 @@ TASKS_DIR = CLOUD_CODEGEN_DIR / "tasks"
 def task(tmp_path, monkeypatch):
     """加载任务模块并把工作区与验收目录指到临时目录。"""
     monkeypatch.setenv("CODEGEN_IMPORT_ONLY", "1")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.syspath_prepend(str(TASKS_DIR))
     sys.modules.pop("spec_task", None)
     import spec_task

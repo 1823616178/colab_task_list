@@ -17,6 +17,7 @@ EXAMPLE_REPO = CLOUD_CODEGEN_DIR / "examples" / "example_repo"
 def task(tmp_path, monkeypatch):
     """加载任务模块并把工作区指到临时目录。"""
     monkeypatch.setenv("CODEGEN_IMPORT_ONLY", "1")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.syspath_prepend(str(TASKS_DIR))
     sys.modules.pop("repo_task", None)
     import repo_task
