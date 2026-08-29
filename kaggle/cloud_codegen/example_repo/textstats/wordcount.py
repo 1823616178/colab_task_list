@@ -1,0 +1,14 @@
+"""词频统计。"""
+
+
+def word_frequencies(text: str) -> dict[str, int]:
+    """统计每个词出现的次数。"""
+    counts: dict[str, int] = {}
+    for word in text.split():
+        counts[word] = counts.get(word, 0) + 1
+    return counts
+
+
+def top_words(text: str, limit: int = 3) -> list[tuple[str, int]]:
+    """返回出现次数最多的若干个词。"""
+    return sorted(word_frequencies(text).items(), key=lambda item: item[1])[:limit]
