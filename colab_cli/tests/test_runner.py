@@ -302,11 +302,12 @@ def test_sse_live_stream_until_terminal(client, mini_workflow, monkeypatch):
     assert client.app.state.manager.running_count() == 0
 
 
-def test_session_busy_409(client, mini_workflow, monkeypatch):
+def test_session_busy_409_when_queue_disabled(client, mini_workflow, monkeypatch):
+    """显式 queue=false 时保持旧语义：同会话有任务 → 409 SESSION_BUSY。"""
     monkeypatch.setattr(core_task, "_DRY_STEP_SECONDS", 0.05)
     first = submit(client, mini_workflow, session="s-busy")
     conflict = client.post(
-        "/tasks", json=make_payload(mini_workflow, session="s-busy"),
+        "/tasks", json=make_payload(mini_workflow, session="s-busy", queue=False),
         headers=AUTH)
     assert conflict.status_code == 409
     body = conflict.json()["error"]
@@ -318,6 +319,59 @@ def test_session_busy_409(client, mini_workflow, monkeypatch):
     # 锁已释放：同 session 可再投
     second = submit(client, mini_workflow, session="s-busy")
     wait_status(client, second)
+
+
+def test_session_fifo_queue(client, mini_workflow, monkeypatch):
+    """同会话任务 FIFO 排队：按提交顺序依次执行，排队位置可查。"""
+    monkeypatch.setattr(core_task, "_DRY_STEP_SECONDS", 0.05)
+    ids = [submit(client, mini_workflow, session="s-fifo") for _ in range(3)]
+    mgr = client.app.state.manager
+    assert mgr.session_queue("s-fifo") == ids[1:]
+    snapshot = client.get(f"/tasks/{ids[2]}", headers=AUTH).json()
+    assert snapshot["status"] == "queued"
+    assert snapshot["queue_position"] == 2
+    for task_id in ids:
+        assert wait_status(client, task_id)["status"] == "succeeded"
+    started = [mgr.get(task_id).started_at for task_id in ids]
+    finished = [mgr.get(task_id).finished_at for task_id in ids]
+    # 串行：后一个开始不早于前一个结束
+    assert started[1] >= finished[0] and started[2] >= finished[1]
+    assert mgr.session_queue("s-fifo") == []
+    assert mgr.task_id_for_session("s-fifo") is None
+
+
+def test_session_queue_cap_and_cancel_queued(client, mini_workflow, monkeypatch):
+    monkeypatch.setattr(core_task, "_DRY_STEP_SECONDS", 0.05)
+    monkeypatch.setenv("COLAB_SESSION_QUEUE_MAX", "2")
+    first = submit(client, mini_workflow, session="s-cap")
+    second = submit(client, mini_workflow, session="s-cap")
+    third = submit(client, mini_workflow, session="s-cap")
+    full = client.post("/tasks", json=make_payload(mini_workflow, session="s-cap"),
+                       headers=AUTH)
+    assert full.status_code == 409
+    assert full.json()["error"]["code"] == "SESSION_QUEUE_FULL"
+
+    # 取消排队中的任务：直接终态，不影响前序与后续
+    canceled = client.post(f"/tasks/{second}/cancel", json={"mode": "interrupt"},
+                           headers=AUTH)
+    assert canceled.status_code == 200
+    assert client.app.state.manager.session_queue("s-cap") == [third]
+    assert wait_status(client, second)["status"] == "canceled"
+    assert wait_status(client, first)["status"] == "succeeded"
+    assert wait_status(client, third)["status"] == "succeeded"
+
+
+def test_queue_requires_reuse_after_keep(client, mini_workflow, monkeypatch):
+    """前序 keep=True（保留 VM）时，非复用的真实任务不能排在后面。"""
+    monkeypatch.setattr(core_task, "_DRY_STEP_SECONDS", 0.05)
+    first = submit(client, mini_workflow, session="s-keep", keep=True)
+    denied = client.post(
+        "/tasks",
+        json=make_payload(mini_workflow, session="s-keep", dry_run=False),
+        headers=AUTH)
+    assert denied.status_code == 409
+    assert denied.json()["error"]["code"] == "SESSION_BUSY"
+    wait_status(client, first)
 
 
 def test_unknown_task_404s(client):

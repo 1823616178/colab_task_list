@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,6 +63,18 @@ class ManagerError(RuntimeError):
 class SessionBusyError(ManagerError):
     http_status = 409
     code = "SESSION_BUSY"
+
+
+class SessionQueueFullError(SessionBusyError):
+    code = "SESSION_QUEUE_FULL"
+
+
+def _queue_max() -> int:
+    """每个会话的排队上限（不含正在运行的那个）；COLAB_SESSION_QUEUE_MAX，缺省 5，0=禁用排队。"""
+    try:
+        return max(0, int(os.environ.get("COLAB_SESSION_QUEUE_MAX", "5")))
+    except ValueError:
+        return 5
 
 
 class TaskNotFoundError(ManagerError):
@@ -168,9 +181,12 @@ class TaskManager:
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="colab-task"
         )
-        self._lock = threading.Lock()  # 护 registry / session map / state 写
+        self._lock = threading.RLock()  # 可重入：submit 持锁 emit 会经回调写 state 文件；护 registry / session map / state 写
         self._records: dict[str, TaskRecord] = {}
         self._session_owner: dict[str, str] = {}  # session -> task_id（非终态）
+        # session -> 排队中的 task_id（FIFO）。不变式：队列非空 ⇒ 该会话有 owner；
+        # owner 释放时由 _release_session 立即把队首提升为 owner 并投入执行。
+        self._session_queue: dict[str, deque[str]] = {}
         self.recovered_inflight: list[str] = []
 
     # ── 受理 ─────────────────────────────────────────────────
@@ -178,13 +194,13 @@ class TaskManager:
     def submit(self, payload: dict) -> TaskRecord:
         """POST /tasks：校验、占 session 锁、发 task.queued、投后台线程。"""
         cfg = self._parse_config(payload)
+        allow_queue = payload.get("queue", True) is not False
         with self._lock:
             owner = self._session_owner.get(cfg.session)
+            enqueue = False
             if owner is not None:
-                raise SessionBusyError(
-                    f"会话 {cfg.session} 仍有任务运行",
-                    {"session": cfg.session, "running_task_id": owner},
-                )
+                self._check_can_enqueue(cfg, owner, allow_queue)
+                enqueue = True
             task_id = create_task_id()
             out_dir = self.output_root / task_id
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -203,19 +219,65 @@ class TaskManager:
                 task_id, out_dir, on_persisted=self._make_on_persisted(record)
             )
             self._records[task_id] = record
-            self._session_owner[cfg.session] = task_id
-        # task.queued 由 Runner 发（core 不发这个），占 seq=0（见 store.py 说明）
-        record.event_log.emit(build_event(
-            task_id,
-            ev.PHASE_TASK_QUEUED,
-            ev.STATUS_START,
-            f"任务已受理: {task_id}",
-            {"session": cfg.session,
-             "workflow_config": str(cfg.workflow_config),
-             "dry_run": cfg.dry_run},
-        ))
-        self._executor.submit(self._execute, record)
+            position = 0
+            if enqueue:
+                queue = self._session_queue.setdefault(cfg.session, deque())
+                queue.append(task_id)
+                position = len(queue)
+            else:
+                self._session_owner[cfg.session] = task_id
+            # task.queued 由 Runner 发（core 不发这个），占 seq=0（见 store.py 说明）。
+            # 在 self._lock 内发：保证 queued 事件先于提升执行后的 task.start 落盘
+            record.event_log.emit(build_event(
+                task_id,
+                ev.PHASE_TASK_QUEUED,
+                ev.STATUS_START,
+                (f"任务已受理: {task_id}（会话 {cfg.session} 排队第 {position} 位）"
+                 if position else f"任务已受理: {task_id}"),
+                {"session": cfg.session,
+                 "workflow_config": str(cfg.workflow_config),
+                 "dry_run": cfg.dry_run,
+                 "queue_position": position},
+            ))
+        if not enqueue:
+            self._executor.submit(self._execute, record)
         return record
+
+    def _check_can_enqueue(self, cfg: TaskConfig, owner: str, allow_queue: bool) -> None:
+        """同会话已有任务时能否排队（调用方须持 self._lock）；不能则抛 409。"""
+        busy_detail = {"session": cfg.session, "running_task_id": owner}
+        owner_record = self._records.get(owner)
+        if not allow_queue or _queue_max() == 0:
+            raise SessionBusyError(f"会话 {cfg.session} 仍有任务运行", busy_detail)
+        if owner_record is None or owner_record.status == "interrupted":
+            # Runner 重启后的对账项：VM 状态未知，不能往后排
+            raise SessionBusyError(
+                f"会话 {cfg.session} 有待对账的中断任务，请先在会话页处理", busy_detail)
+        queue = self._session_queue.get(cfg.session) or deque()
+        if len(queue) >= _queue_max():
+            raise SessionQueueFullError(
+                f"会话 {cfg.session} 排队已满（上限 {_queue_max()}）",
+                {**busy_detail, "queue_length": len(queue)},
+            )
+        # 前一个任务 keep=True 会留下同名 VM；新任务若不是复用模式会新建同名 VM，
+        # 把旧 VM 变成名称丢失的计费孤儿 —— 必须显式 reuse 才能排在它后面
+        predecessor = self._records.get(queue[-1]) if queue else owner_record
+        if (predecessor is not None and predecessor.cfg is not None
+                and predecessor.cfg.keep and not cfg.reuse and not cfg.dry_run):
+            raise SessionBusyError(
+                f"会话 {cfg.session} 的前序任务会保留 VM，排队任务须开启「复用会话」",
+                busy_detail,
+            )
+
+    def queue_position(self, record: TaskRecord) -> Optional[int]:
+        """排队中的任务返回 1 起的位置；正在运行/未排队返回 None。"""
+        queue = self._session_queue.get(record.session)
+        if not queue or record.task_id not in queue:
+            return None
+        return list(queue).index(record.task_id) + 1
+
+    def session_queue(self, session: str) -> list[str]:
+        return list(self._session_queue.get(session) or ())
 
     def _parse_config(self, payload: dict) -> TaskConfig:
         if not isinstance(payload, dict):
@@ -346,7 +408,10 @@ class TaskManager:
             record.cancel_mode = mode
             # Drive OAuth 会在本地伪终端阻塞等待 Enter。仅下发远端 stop/restart
             # 无法保证解除它（尤其名称映射已经丢失时），必须先终止本地等待。
-            cancel_drive_mount(record.session)
+            waiting_in_queue = self.queue_position(record) is not None
+            if not waiting_in_queue:
+                # 排队中的任务还没碰会话：不能误杀前序任务的 Drive 授权等待
+                cancel_drive_mount(record.session)
             if record.status == "queued":
                 # 尚未进 run_task：直接置终态，不碰 VM（doc/02 §2.3.2）。
                 # 任务线程稍后被 executor 拾取时看到终态会直接返回。
@@ -553,6 +618,7 @@ class TaskManager:
             "recoverable": record.recoverable,
             "recovered": record.recovered,
             "dry_run": bool(record.cfg.dry_run) if record.cfg else None,
+            "queue_position": self.queue_position(record),
             "transport_mode": record.transport_mode,
             "duration_ms": record.duration_ms,
             "error": record.error,
@@ -683,9 +749,26 @@ class TaskManager:
         self._sync_state_file()
 
     def _release_session(self, record: TaskRecord) -> None:
+        """释放会话：owner 释放后把队首（跳过已取消的）提升为 owner 并投入执行；
+        排队中被取消的任务只从队列移除。"""
+        promoted: Optional[TaskRecord] = None
         with self._lock:
+            queue = self._session_queue.get(record.session)
+            if queue and record.task_id in queue:
+                queue.remove(record.task_id)
             if self._session_owner.get(record.session) == record.task_id:
                 self._session_owner.pop(record.session, None)
+                while queue:
+                    candidate = self._records.get(queue.popleft())
+                    if candidate is None or candidate.terminal:
+                        continue
+                    self._session_owner[record.session] = candidate.task_id
+                    promoted = candidate
+                    break
+            if queue is not None and not queue:
+                self._session_queue.pop(record.session, None)
+        if promoted is not None:
+            self._executor.submit(self._execute, promoted)
 
     def _sync_state_file(self) -> None:
         """重写 runner_state.json（原子 tmp+replace+fsync）；只记在飞任务。"""
