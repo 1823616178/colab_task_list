@@ -20,7 +20,9 @@ from ..common.config import OPENAI_PATH_SUFFIX, Settings, load_settings
 from ..common.errors import ConfigError, KaggleToolsError
 from ..common.kaggle_cli import current_username, run_kaggle
 from ..common.logging import get_logger, setup_logging
+from .apply import ApplyError, apply_diff, find_diff, is_empty_diff, summarize_diff
 from .build import SOURCE_DIRECTORY, build_tasks
+from .runs import latest_run, mark_latest, new_run_dir
 
 logger = get_logger(__name__)
 
@@ -173,14 +175,46 @@ def command_local(args: argparse.Namespace) -> int:
     if args.resume:
         environment["CODEGEN_RESUME"] = "1"
 
-    work_directory = Path(args.output).resolve()
-    work_directory.mkdir(parents=True, exist_ok=True)
+    work_directory = local_output(args)
+    if work_directory is None:
+        print("--resume 需要上一次的本地运行, 但 runs/local/latest 不存在; 用 -o 指定目录。",
+              file=sys.stderr)
+        return 1
     print(f"任务: {task_file.name}")
     print(f"模型: {environment['LLM_DEFAULT']}")
     print(f"产物: {work_directory}\n")
-    return subprocess.run(
+    exit_code = subprocess.run(
         [sys.executable, str(task_file)], env=environment, cwd=work_directory
     ).returncode
+    if work_directory.is_relative_to(RUNS_DIRECTORY.resolve()):
+        mark_latest(RUNS_DIRECTORY, "local", work_directory)
+    report_diff(work_directory)
+    return exit_code
+
+
+def local_output(args: argparse.Namespace) -> Path | None:
+    """本地运行目录: 显式 -o > --resume 时沿用上一次 > 新建带时间戳的目录。"""
+    if args.output:
+        path = Path(args.output).resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    if args.resume:
+        return latest_run(RUNS_DIRECTORY, "local")
+    return new_run_dir(RUNS_DIRECTORY, "local", args.model or "").resolve()
+
+
+def report_diff(run_dir: Path) -> None:
+    """打印产物里 changes.diff 的概要和后续命令。"""
+    diff_path = find_diff(run_dir)
+    if diff_path is None:
+        return
+    text = diff_path.read_text(encoding="utf-8")
+    if is_empty_diff(text):
+        print(f"\nchanges.diff: 无改动 ({diff_path})")
+        return
+    print(f"\n改动概要 ({diff_path}):")
+    print(summarize_diff(text).describe())
+    print(f"\n审查后应用到本地仓库新分支: kcloud apply --repo <仓库> --diff {diff_path}")
 
 
 def command_build(args: argparse.Namespace) -> int:
@@ -313,17 +347,66 @@ def command_log(args: argparse.Namespace) -> int:
 
 
 def command_download(args: argparse.Namespace) -> int:
-    """下载 run 产物并列出文件；Kaggle CLI 会自行解压输出包。"""
-    output = Path(args.output).resolve()
+    """下载 run 产物到新的时间戳目录并列出文件；Kaggle CLI 会自行解压输出包。"""
+    if args.output:
+        output = Path(args.output).resolve()
+    else:
+        output = new_run_dir(RUNS_DIRECTORY, "cloud", args.model).resolve()
     exit_code = kaggle_command(
         ["b", "t", "download", task_of(args)[0], "-m", args.model, "-o", str(output)]
     )
     if exit_code != 0:
         return exit_code
-    print("\n下载到的文件:")
+    if output.is_relative_to(RUNS_DIRECTORY.resolve()):
+        mark_latest(RUNS_DIRECTORY, "cloud", output)
+    print(f"\n下载到 {output}:")
     for path in sorted(output.rglob("*")):
         if path.is_file():
             print(f"  {path.relative_to(output)}  ({path.stat().st_size} B)")
+    report_diff(output)
+    return 0
+
+
+def command_cycle(args: argparse.Namespace) -> int:
+    """一条龙: push(可跳过) -> run 并等待 -> status -> download -> 改动概要。"""
+    steps = []
+    if not args.skip_push:
+        steps.append(("push", command_push))
+    steps += [("run", command_run), ("status", command_status), ("download", command_download)]
+    for index, (name, handler) in enumerate(steps, start=1):
+        print(f"\n==== [{index}/{len(steps)}] {name} ====", flush=True)
+        exit_code = handler(args)
+        if exit_code != 0 and name != "status":
+            print(f"\n{name} 失败(exit {exit_code}), 流程中止。", file=sys.stderr)
+            return exit_code
+    return 0
+
+
+def command_apply(args: argparse.Namespace) -> int:
+    """把 changes.diff 应用到本地仓库的新分支(先 git apply --check)。"""
+    if args.diff:
+        diff_path = Path(args.diff).resolve()
+    else:
+        run_dir = latest_run(RUNS_DIRECTORY, args.source) if args.source else latest_run(RUNS_DIRECTORY)
+        diff_path = find_diff(run_dir) if run_dir else None
+        if diff_path is None:
+            print("找不到最近一次运行的 changes.diff, 用 --diff 指定。", file=sys.stderr)
+            return 1
+    if not diff_path.is_file():
+        print(f"diff 文件不存在: {diff_path}", file=sys.stderr)
+        return 1
+    print(f"diff: {diff_path}")
+    try:
+        branch, summary = apply_diff(
+            Path(args.repo), diff_path, branch=args.branch,
+            commit=not args.no_commit, allow_dirty=args.allow_dirty,
+        )
+    except ApplyError as error:
+        print(f"未应用: {error}", file=sys.stderr)
+        return 1
+    print(summary.describe())
+    state = "未提交(--no-commit)" if args.no_commit else "已提交"
+    print(f"\n已在新分支 {branch} 上应用, {state}。审查: git -C {args.repo} show --stat")
     return 0
 
 
@@ -340,10 +423,11 @@ def build_parser() -> argparse.ArgumentParser:
     local_parser.add_argument("-m", "--model", default=None)
     local_parser.add_argument("-r", "--repo", default=None, help="仓库路径(repo 任务用)")
     local_parser.add_argument("-s", "--spec", default=None, help="契约文档路径(spec 任务用)")
-    local_parser.add_argument("-o", "--output", default=str(RUNS_DIRECTORY / "local"))
+    local_parser.add_argument("-o", "--output", default=None,
+                              help="产物目录, 默认 runs/local/<时间戳>")
     local_parser.add_argument(
         "--resume", action="store_true",
-        help="接着 -o 目录里上一轮的 workspace 改, 而不是从原始仓库重新复制",
+        help="接着上一轮(默认 runs/local/latest, 或 -o 目录)的 workspace 改",
     )
     add_prompt_arguments(local_parser)
     add_job_arguments(local_parser)
@@ -382,8 +466,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     download_parser = subparsers.add_parser("download", help="下载并解压产物")
     download_parser.add_argument("-m", "--model", default=SETTINGS.cloud_default_model)
-    download_parser.add_argument("-o", "--output", default=str(RUNS_DIRECTORY / "cloud"))
+    download_parser.add_argument("-o", "--output", default=None,
+                                 help="下载目录, 默认 runs/cloud/<时间戳-模型>")
     download_parser.set_defaults(handler=command_download)
+
+    cycle_parser = subparsers.add_parser(
+        "cycle", help="push -> run -> status -> download 一条龙(push 永久, 需确认)")
+    cycle_parser.add_argument("-d", "--dataset", action="append", default=[],
+                              help="挂载数据集 owner/slug, 可重复")
+    cycle_parser.add_argument("-m", "--model", default=SETTINGS.cloud_default_model)
+    cycle_parser.add_argument("--wait", type=int, default=SETTINGS.cloud_run_wait_seconds)
+    cycle_parser.add_argument("-o", "--output", default=None)
+    cycle_parser.add_argument("--skip-push", action="store_true", help="任务已推送过, 直接运行")
+    cycle_parser.add_argument("-y", "--yes", action="store_true")
+    cycle_parser.set_defaults(handler=command_cycle)
+
+    apply_parser = subparsers.add_parser("apply", help="把 changes.diff 应用到本地仓库的新分支")
+    apply_parser.add_argument("-r", "--repo", required=True, help="本地 git 仓库根目录")
+    apply_parser.add_argument("--diff", default=None,
+                              help="diff 文件, 默认取 runs/latest 里的 changes.diff")
+    apply_parser.add_argument("--source", choices=["local", "cloud"], default=None,
+                              help="不给 --diff 时只看该类最近一次运行")
+    apply_parser.add_argument("-b", "--branch", default=None, help="新分支名, 默认 kcloud/<时间戳>")
+    apply_parser.add_argument("--no-commit", action="store_true", help="只应用不提交")
+    apply_parser.add_argument("--allow-dirty", action="store_true", help="允许工作区有未提交改动")
+    apply_parser.set_defaults(handler=command_apply)
 
     build_parser_ = subparsers.add_parser("build", help="生成可单文件 push 的任务脚本")
     build_parser_.add_argument("-o", "--output", default=str(RUNS_DIRECTORY / "tasks"))

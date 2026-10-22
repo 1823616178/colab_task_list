@@ -38,9 +38,9 @@ def test_generated_files_default_to_runs_directory():
     dataset = parser.parse_args(["dataset", "--repo", "."])
     download = parser.parse_args(["download"])
 
-    assert Path(local.output).parent == run_cloud.RUNS_DIRECTORY
+    # local/download 默认不给目录, 运行时在 runs/<kind>/ 下新建时间戳目录
+    assert local.output is None and download.output is None
     assert Path(dataset.staging).parent == run_cloud.RUNS_DIRECTORY
-    assert Path(download.output).parent == run_cloud.RUNS_DIRECTORY
 
 
 @pytest.mark.parametrize("staging_name", ["same", "child"])
