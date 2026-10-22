@@ -480,3 +480,30 @@ MiniMax H3 当前只支持 GPU。ComfyUI 的设备管理没有 PyTorch/XLA 后�
 | `COLAB_REATTACH_POLL_SECONDS` | 30 | 重连期间轮询远端产物清单的间隔 |
 
 提交任务时请求体可带 `"queue": false`，同会话忙时直接返回 409 而不排队。
+
+## Docker 一键启动（Web + Runner + MySQL）
+
+一条 `docker compose` 同时起三个容器：`web`（Nuxt，映射宿主 3000）、`runner`（Python Runner，**不映射宿主端口**，
+只在 compose 网络里被 web 访问）、`mysql`（8.4，数据存在卷 `mysql_data`）。web 启动时自动跑数据库迁移（含 012/013）。
+Runner 产物卷 `colab_output` 在两个容器里挂在同一路径 `/data/colab_output`。
+
+Windows（Docker Desktop，PowerShell）：
+
+```powershell
+cd E:\code\colab_task_list\colab_cli
+Copy-Item .env.docker.example .env.docker     # 用记事本填 RUNNER_TOKEN / JWT_SECRET / DB_PASSWORD / DB_ROOT_PASSWORD / ADMIN_PASSWORD
+docker compose --env-file .env.docker up -d --build
+docker compose --env-file .env.docker ps       # 三个服务都应为 healthy
+start http://127.0.0.1:3000
+```
+
+Linux / macOS 把 `Copy-Item` 换成 `cp`，其余相同。
+
+- **Colab 登录**：登录态存在 `./secrets/colab`（挂到容器 `/root/.config/colab-cli`，里面是 `token.json`）。首次运行
+  `docker compose --env-file .env.docker exec -it runner colab sessions`，按提示在浏览器打开链接并粘贴授权码，token 会持久化在该目录。
+  已在宿主登录过的，也可以直接把宿主 `~/.config/colab-cli/` 的内容复制进去。
+- **Kaggle / Modal**：在 `.env.docker` 填 `KAGGLE_USERNAME`/`KAGGLE_KEY`、`MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`，并设 `INSTALL_BACKENDS=1` 后重新 `--build`。
+- 局域网访问：`WEB_BIND=0.0.0.0`；走 HTTPS 反代时把 `AUTH_COOKIE_SECURE=true`。
+- 常用：`docker compose --env-file .env.docker logs -f runner`；停止 `down`（加 `-v` 会删除数据库和产物卷，慎用）。
+- Runner 在容器内绑 `0.0.0.0` 需要显式 `COLAB_RUNNER_HOST=0.0.0.0` + `COLAB_RUNNER_ALLOW_NON_LOOPBACK=1`（compose 已设置）；
+  直接 `python -m colab_runner` 时默认仍只绑 127.0.0.1。

@@ -965,3 +965,13 @@ def test_relative_paths_anchored_to_repo(client, tmp_path, monkeypatch,
     monkeypatch.setattr(runner_manager, "HERE", tmp_path)
     task_id = submit(client, "wf/workflow.json", session="s-rel")
     assert wait_status(client, task_id)["status"] == "succeeded"
+
+
+def test_runner_host_defaults_to_loopback():
+    from colab_runner.__main__ import resolve_host
+
+    assert resolve_host({}) == "127.0.0.1"
+    with pytest.raises(SystemExit):
+        resolve_host({"COLAB_RUNNER_HOST": "0.0.0.0"})
+    assert resolve_host({"COLAB_RUNNER_HOST": "0.0.0.0",
+                         "COLAB_RUNNER_ALLOW_NON_LOOPBACK": "1"}) == "0.0.0.0"

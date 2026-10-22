@@ -1,0 +1,12 @@
+web/
+**/__pycache__/
+**/.pytest_cache/
+.env
+.env.*
+!.env.docker.example
+colab_output/
+colab_output_dev/
+logs/
+runner_state.json
+*.zip
+yarn.lock

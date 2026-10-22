@@ -1,0 +1,116 @@
+# 一条命令同时启动 Web 控制台 + Python Runner + MySQL：
+#   cp .env.docker.example .env.docker   # 填密钥
+#   docker compose --env-file .env.docker up -d --build
+# Runner、MySQL 都不映射宿主端口；只有 Web 映射到宿主 ${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}。
+name: colab-task
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-colab_task}
+      MYSQL_USER: ${DB_USER:-colab}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?请在 .env.docker 设置 DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?请在 .env.docker 设置 DB_ROOT_PASSWORD}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks: [db]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+      args:
+        INSTALL_BACKENDS: ${INSTALL_BACKENDS:-0}
+    restart: unless-stopped
+    environment:
+      COLAB_RUNNER_TOKEN: ${RUNNER_TOKEN:?请在 .env.docker 设置 RUNNER_TOKEN}
+      COLAB_RUNNER_HOST: 0.0.0.0
+      COLAB_RUNNER_ALLOW_NON_LOOPBACK: "1"   # 只在内部网络 backend 上，未发布端口
+      COLAB_RUNNER_WORKERS: ${RUNNER_WORKERS:-4}
+      COLAB_TRANSPORT: ${COLAB_TRANSPORT:-native}
+      COLAB_CLI_STATE_DIR: /data/state/colab_sessions
+      COLAB_BACKEND_STATE_DIR: /data/state/backends
+      # Kaggle / Modal 凭据走环境变量（不用可留空）
+      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
+      KAGGLE_KEY: ${KAGGLE_KEY:-}
+      MODAL_TOKEN_ID: ${MODAL_TOKEN_ID:-}
+      MODAL_TOKEN_SECRET: ${MODAL_TOKEN_SECRET:-}
+      COMPUTE_BACKEND: ${COMPUTE_BACKEND:-colab}
+      KAGGLE_MODELS_DATASET: ${KAGGLE_MODELS_DATASET:-}
+      MODAL_SECRETS: ${MODAL_SECRETS:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      # 与 web 同路径挂同一个卷：Web 直接读 Runner 写的产物/事件（runnerOutputDir）
+      - colab_output:/data/colab_output
+      - ./workflows:/srv/colab_cli/workflows
+      - runner_state:/data/state
+      # Colab 登录态（google-colab-cli 的 OAuth 凭据目录），可写：令牌刷新要回写
+      - ${COLAB_AUTH_DIR:-./secrets/colab}:/root/.config/colab-cli
+    # runner 网络需要出网（Colab/Kaggle/Modal API），但不设 ports：Runner 能创建计费 VM，绝不映射到宿主
+    networks: [runner]
+    expose: ["8765"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8765/health -H \"X-Internal-Token: $$COLAB_RUNNER_TOKEN\" >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  web:
+    build:
+      context: ./web
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      runner:
+        condition: service_healthy
+    # 其余 NUXT_*（如 NUXT_FTP_*）可直接写在 .env.docker 里透传
+    env_file:
+      - path: .env.docker
+        required: false
+    environment:
+      NUXT_DB_HOST: mysql
+      NUXT_DB_PORT: 3306
+      NUXT_DB_USER: ${DB_USER:-colab}
+      NUXT_DB_PASSWORD: ${DB_PASSWORD}
+      NUXT_DB_NAME: ${DB_NAME:-colab_task}
+      NUXT_JWT_SECRET: ${JWT_SECRET:?请在 .env.docker 设置 JWT_SECRET}
+      NUXT_ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      NUXT_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env.docker 设置 ADMIN_PASSWORD}
+      # 本机 http 访问时须为 false，否则浏览器不回传 Secure cookie；上 HTTPS 反代后改 true
+      NUXT_AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      NUXT_RUNNER_URL: http://runner:8765
+      NUXT_RUNNER_TOKEN: ${RUNNER_TOKEN}
+      NUXT_REPO_ROOT: /srv/colab_cli
+      NUXT_RUNNER_OUTPUT_DIR: /data/colab_output
+      NUXT_OUTPUT_RETENTION_DAYS: ${OUTPUT_RETENTION_DAYS:-14}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - colab_output:/data/colab_output
+      # Web 读工作流配置 / api.json / 示例图片（只读），workflows 可写
+      - ./:/srv/colab_cli:ro
+      - ./workflows:/srv/colab_cli/workflows
+    networks: [db, runner, frontend]
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+
+networks:
+  db:
+    internal: true   # 无外网：只有 mysql 与 web
+  runner: {}         # runner ↔ web；可出网，未发布端口
+  frontend: {}
+
+volumes:
+  mysql_data:
+  colab_output:
+  runner_state:

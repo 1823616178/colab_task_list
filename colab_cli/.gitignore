@@ -14,3 +14,5 @@ logs/*
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+secrets/
+.env.docker
