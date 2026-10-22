@@ -271,28 +271,43 @@ async function onDownload(kind: 'output' | 'log') {
 .container_task_detail_toolbar_root {
   display: flex;
   gap: var(--sp-4);
-  align-items: baseline;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: var(--sp-4);
 }
 
 .container_task_detail_header_title {
   margin: 0;
   font-size: var(--fs-xl);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--c-text);
   word-break: break-all;
 }
 
 .container_task_detail_header_conn {
+  display: inline-flex;
   flex: none;
-  color: var(--c-text-weak);
+  gap: 6px;
+  align-items: center;
+  padding: 3px 10px;
   font-size: var(--fs-xs);
+  color: var(--c-text-weak);
+  background: var(--c-surface-sub);
+  border: 1px solid var(--c-border);
+  border-radius: 12px;
 }
 
 .container_task_detail_header_conn[data-state='open'] {
   color: var(--c-success);
+  background: var(--c-success-bg-subtle);
+  border-color: var(--c-success-border);
 }
 
 .container_task_detail_header_conn[data-state='reconnecting'] {
   color: var(--c-warn);
+  background: var(--c-warn-bg);
+  border-color: var(--c-warn-border);
 }
 
 .container_task_detail_card_error {
@@ -305,12 +320,13 @@ async function onDownload(kind: 'output' | 'log') {
 }
 
 .container_task_detail_card_summary {
-  padding: var(--sp-4);
+  padding: var(--sp-6);
   margin-bottom: var(--sp-4);
   background: var(--c-surface);
   border: 1px solid var(--c-border);
+  border-top: 2px solid var(--c-brand);
   border-radius: var(--r-md);
-  box-shadow: var(--sh-1);
+  box-shadow: var(--sh-2);
 }
 
 
@@ -384,28 +400,39 @@ async function onDownload(kind: 'output' | 'log') {
 }
 
 .container_task_detail_summary_row {
-  margin: var(--sp-1) 0;
+  margin: var(--sp-2) 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-sub);
+}
+
+.container_task_detail_summary_status {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  border-radius: var(--r-sm);
 }
 
 .container_task_detail_summary_status[data-status='running'] {
   color: var(--c-running);
-  font-weight: 600;
+  background: var(--c-running-bg);
 }
 
 .container_task_detail_summary_status[data-status='succeeded'] {
   color: var(--c-success);
-  font-weight: 600;
+  background: var(--c-success-bg);
 }
 
 .container_task_detail_summary_status[data-status='failed'],
 .container_task_detail_summary_status[data-status='orphaned'] {
   color: var(--c-danger);
-  font-weight: 600;
+  background: var(--c-danger-bg);
 }
 
 .container_task_detail_summary_status[data-status='recoverable'] {
-  color: var(--c-warn-text);
-  font-weight: 600;
+  color: var(--c-warn);
+  background: var(--c-warn-bg);
+  border: 1px solid var(--c-warn-border);
 }
 
 .container_task_detail_summary_error {
@@ -416,16 +443,19 @@ async function onDownload(kind: 'output' | 'log') {
 .container_task_detail_toolbar_cancel {
   display: flex;
   gap: var(--sp-3);
-  margin-top: var(--sp-3);
+  margin-top: var(--sp-4);
 }
 
 .container_task_detail_toolbar_interrupt {
   color: var(--c-warn-text);
+  background: var(--c-surface-sub);
   border: 1px solid var(--c-warn);
 }
 
 .container_task_detail_toolbar_destroy {
-  color: var(--c-danger);
+  font-weight: 600;
+  color: var(--c-text-invert);
+  background: var(--c-danger);
   border: 1px solid var(--c-danger);
 }
 
@@ -437,26 +467,37 @@ async function onDownload(kind: 'output' | 'log') {
   box-shadow: var(--sh-1);
 }
 
-
 .container_task_detail_footer_download,
 .container_task_detail_footer_runlog,
 .container_task_detail_footer_redownload {
   padding: 10px 20px;
+  font-weight: 600;
   color: var(--c-text-invert);
   border: none;
+  border-radius: var(--r-sm);
+  transition: filter var(--t-fast);
 }
 
 .container_task_detail_footer_download {
   background: var(--c-brand);
+  box-shadow: var(--sh-glow-brand);
 }
 
 .container_task_detail_footer_runlog {
-  background: var(--c-text-sub);
+  color: var(--c-text);
+  background: var(--c-surface-sub);
+  border: 1px solid var(--c-border-strong);
 }
 
 .container_task_detail_footer_redownload {
-  font-weight: 600;
   background: var(--c-warn);
+  box-shadow: var(--sh-glow-warn);
+}
+
+.container_task_detail_footer_download:hover:not(:disabled),
+.container_task_detail_footer_runlog:hover:not(:disabled),
+.container_task_detail_footer_redownload:hover:not(:disabled) {
+  filter: brightness(1.1);
 }
 
 .container_task_detail_footer_note {

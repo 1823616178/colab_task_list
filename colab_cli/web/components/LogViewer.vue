@@ -130,6 +130,7 @@ function toggleFollow() {
 .container_task_detail_panel_logscroll {
   overflow-y: auto;
   background: var(--c-log-bg);
+  border: 1px solid var(--c-border);
   border-radius: var(--r-sm);
 }
 
@@ -151,6 +152,11 @@ function toggleFollow() {
   line-height: 20px;
   color: var(--c-log-text);
   white-space: pre;
+  transition: background-color var(--t-fast);
+}
+
+.container_task_detail_panel_logline:hover {
+  background: var(--c-brand-bg);
 }
 
 .container_task_detail_panel_lineno {

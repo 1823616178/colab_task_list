@@ -5,20 +5,31 @@
 
 ```bash
 cd kaggle/cloud_codegen
-python run_cloud.py -t repo local  --repo ./psv_quota --prompt-file ./examples/prompts/psv-aiquota-app.md --output ./runs/psv-quota-local-01 --model anthropic/claude-sonnet-5@default
+python run_cloud.py -t repo local \
+  --repo ./examples/psv_quota \
+  --prompt-file ./examples/prompts/psv-aiquota-app.md \
+  --output ./runs/psv-quota-local-01 \
+  --model anthropic/claude-sonnet-5@default \
+  --verify "bash scripts/test.sh" \
+  --protected "" \
+  --max-rounds 120
 ```
 
-`local` 子命令没有 `--verify` 参数，验收命令写死在任务文件里，所以跑之前先改
-`tasks/repo_task.py` 这三处：
+后三个覆盖项必须给，否则任务会拿默认值跑偏：
 
-```python
-REPO_NAME = "psv_quota"                       # 只有云端按名字找仓库，本地被 --repo 覆盖
-VERIFY_COMMAND = ["bash", "scripts/test.sh"]  # 必须是参数列表，不能写成带管道的 shell 字符串
-PROTECTED_PREFIXES = ()                       # 仓库从零生成，tests/ 也要让模型自己写
-```
+| 参数 | 不给会怎样 |
+| --- | --- |
+| `--verify "bash scripts/test.sh"` | 默认验收命令是 `python -m pytest -q`，这个仓库里没有 pytest 用例，会以 `exit_code=5`（未收集到测试）直接判失败 |
+| `--protected ""` | 默认保护 `tests/`，但这个仓库从零生成，测试也得模型自己写 |
+| `--max-rounds 120` | 默认 16 轮，只够写两三个文件 |
 
 `scripts/test.sh` 需要 gcc 与 ASan，这条命令请在 WSL 里执行；Windows 侧的 Git Bash
 没有可用的 gcc，验收会直接失败。
+
+**一次跑不完整个 §9。** 8 个 `[T-xx]` 合计三十多个源文件，单次 run 的上下文和轮数都
+撑不住，模型会写到一半停在「验收还是红的」。实际做法是把本文当设计文档，每次只把
+**一个 `[T-xx]` 的段落**（外加 §3 契约与 §13 约束）喂进 `--prompt-file`，产物审完
+应用回 `examples/psv_quota/`，再跑下一个 —— 后一轮就能读到前一轮的成果。
 
 产物在 `runs/psv-quota-local-01/`：先看 `verification.txt` 的 `exit_code`，再审
 `changes.diff` 与 `workspace/`，确认无误后手动应用到本地仓库——任务不会直接改

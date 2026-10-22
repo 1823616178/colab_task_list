@@ -1,17 +1,20 @@
 import { defineStore } from 'pinia'
 
 // doc/04 §3：ui toast、全局 loading、主题
-// P3 落地 toast（至少错误提示）；globalLoading / theme 留待后续阶段。
+// P3 落地 toast（至少错误提示）；doc/09 支持白天与夜间主题切换。
 export interface Toast {
   id: number
   kind: 'info' | 'warn' | 'error'
   text: string
 }
 
+export type Theme = 'dark' | 'light'
+
 let nextToastId = 1
 
 export const useUiStore = defineStore('ui', () => {
   const toasts = ref<Toast[]>([])
+  const theme = ref<Theme>('dark')
 
   function remove(id: number) {
     toasts.value = toasts.value.filter(t => t.id !== id)
@@ -37,5 +40,57 @@ export const useUiStore = defineStore('ui', () => {
     push('error', text, 8000)
   }
 
-  return { toasts, remove, push, info, warn, error }
+  function applyTheme(t: Theme) {
+    if (typeof document !== 'undefined' && document.documentElement) {
+      document.documentElement.setAttribute('data-theme', t)
+    }
+  }
+
+  function initTheme() {
+    if (typeof window === 'undefined') return
+    try {
+      const saved = localStorage.getItem('colab_theme') as Theme | null
+      if (saved === 'light' || saved === 'dark') {
+        theme.value = saved
+      } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+        theme.value = 'light'
+      } else {
+        theme.value = 'dark'
+      }
+      applyTheme(theme.value)
+    } catch {
+      theme.value = 'dark'
+      applyTheme('dark')
+    }
+  }
+
+  function setTheme(t: Theme) {
+    theme.value = t
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('colab_theme', t)
+      }
+    } catch {
+      // 容错
+    }
+    applyTheme(t)
+  }
+
+  function toggleTheme() {
+    setTheme(theme.value === 'light' ? 'dark' : 'light')
+  }
+
+  return {
+    toasts,
+    theme,
+    remove,
+    push,
+    info,
+    warn,
+    error,
+    initTheme,
+    setTheme,
+    toggleTheme,
+    applyTheme,
+  }
 })

@@ -15,13 +15,24 @@ const dragover = ref(false)
 const inputRef = ref<HTMLInputElement | null>(null)
 
 const previewUrl = ref<string | null>(null)
+const fileError = ref('')
 
 function setFile(file: File | null) {
-  if (file && !file.type.startsWith('image/')) return
+  if (file && !/\.(png|jpe?g|webp|bmp|gif|tiff?)$/i.test(file.name)) {
+    fileError.value = '仅支持 PNG、JPEG、WebP、BMP、GIF、TIFF 图片'
+    return
+  }
+  fileError.value = ''
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
   previewUrl.value = file ? URL.createObjectURL(file) : null
   emit('update:modelValue', file)
 }
+
+watch(() => props.modelValue, (file) => {
+  if (file || !previewUrl.value) return
+  URL.revokeObjectURL(previewUrl.value)
+  previewUrl.value = null
+})
 
 function onDrop(event: DragEvent) {
   dragover.value = false
@@ -55,7 +66,7 @@ const fileName = computed(() => props.modelValue?.name ?? '')
       ref="inputRef"
       class="container_workflow_frames_drop_input"
       type="file"
-      accept="image/*"
+      accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff"
       @change="onInputChange"
     >
     <img
@@ -68,6 +79,7 @@ const fileName = computed(() => props.modelValue?.name ?? '')
       {{ modelValue ? fileName : `拖放${label}到这里，或点击选择` }}
     </span>
     <span v-if="hint" class="container_workflow_frames_drop_hint">{{ hint }}</span>
+    <span v-if="fileError" class="container_workflow_frames_drop_hint" role="alert">{{ fileError }}</span>
     <button
       v-if="modelValue"
       class="container_workflow_frames_drop_clear"
@@ -93,11 +105,16 @@ const fileName = computed(() => props.modelValue?.name ?? '')
   background: var(--c-surface-sub);
   border: 2px dashed var(--c-border-strong);
   border-radius: var(--r-md);
+  transition:
+    background-color var(--t-base),
+    border-color var(--t-base),
+    box-shadow var(--t-base);
 }
 
 .container_workflow_frames_drop_zone[data-dragover='true'] {
   background: var(--c-brand-bg);
   border-color: var(--c-brand);
+  box-shadow: var(--sh-glow-brand);
 }
 
 .container_workflow_frames_drop_zone[data-filled='true'] {
@@ -112,7 +129,9 @@ const fileName = computed(() => props.modelValue?.name ?? '')
 .container_workflow_frames_drop_preview {
   max-width: 100%;
   max-height: 180px;
+  border: 1px solid var(--c-border);
   border-radius: var(--r-sm);
+  box-shadow: var(--sh-1);
   object-fit: contain;
 }
 
@@ -130,7 +149,9 @@ const fileName = computed(() => props.modelValue?.name ?? '')
 .container_workflow_frames_drop_clear {
   padding: 2px 10px;
   color: var(--c-danger);
+  background: var(--c-surface);
   border: 1px solid var(--c-danger);
+  border-radius: var(--r-sm);
 }
 
 </style>

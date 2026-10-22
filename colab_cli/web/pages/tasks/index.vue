@@ -152,8 +152,10 @@ onMounted(refresh)
               <NuxtLink :to="`/tasks/${task.id}`">{{ task.id }}</NuxtLink>
             </td>
             <td class="container_task_list_cell_workflow">{{ task.workflowName }}</td>
-            <td class="container_task_list_cell_status" :data-status="task.status">
-              {{ statusLabel(task.status) }}
+            <td class="container_task_list_cell_status">
+              <span class="container_task_list_cell_badge" :data-status="task.status">
+                {{ statusLabel(task.status) }}
+              </span>
             </td>
             <td class="container_task_list_cell_session">{{ task.sessionName }}</td>
             <td class="container_task_list_cell_gpu">
@@ -240,7 +242,12 @@ onMounted(refresh)
 }
 
 .container_task_list_filter_status {
-  padding: 6px 10px;
+  padding: 6px 12px;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface-sub);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
 }
 
 .container_task_list_card_recoverable {
@@ -250,6 +257,7 @@ onMounted(refresh)
   background: var(--c-warn-bg);
   border: 1px solid var(--c-warn-border);
   border-radius: var(--r-md);
+  box-shadow: var(--sh-glow-warn);
 }
 
 .container_task_list_body_table {
@@ -262,38 +270,78 @@ onMounted(refresh)
   box-shadow: var(--sh-1);
 }
 
+.container_task_list_row_head th {
+  vertical-align: middle;
+}
+
+.container_task_list_row_item,
+.container_task_list_row_item td {
+  vertical-align: middle;
+}
+
 .container_task_list_row_item[data-status='recoverable'] {
   background: var(--c-warn-bg);
   box-shadow: inset 3px 0 0 var(--c-warn);
 }
 
+.container_task_list_cell_id a {
+  font-family: var(--ff-mono);
+  font-weight: 600;
+  color: var(--c-brand);
+}
+
 .container_task_list_cell_empty {
   color: var(--c-text-weak);
   text-align: center;
+  vertical-align: middle;
 }
 
-.container_task_list_cell_status[data-status='running'] {
-  color: var(--c-running);
+.container_task_list_cell_status {
+  vertical-align: middle;
 }
 
-.container_task_list_cell_status[data-status='succeeded'] {
-  color: var(--c-success);
-}
-
-.container_task_list_cell_status[data-status='failed'],
-.container_task_list_cell_status[data-status='orphaned'] {
-  color: var(--c-danger);
-}
-
-.container_task_list_cell_status[data-status='recoverable'] {
-  color: var(--c-warn-text);
+.container_task_list_cell_badge {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: var(--fs-xs);
   font-weight: 600;
+  border-radius: var(--r-sm);
+  vertical-align: middle;
+}
+
+.container_task_list_cell_badge[data-status='running'] {
+  color: var(--c-running);
+  background: var(--c-running-bg);
+}
+
+.container_task_list_cell_badge[data-status='succeeded'] {
+  color: var(--c-success);
+  background: var(--c-success-bg);
+}
+
+.container_task_list_cell_badge[data-status='failed'],
+.container_task_list_cell_badge[data-status='orphaned'] {
+  color: var(--c-danger);
+  background: var(--c-danger-bg);
+}
+
+.container_task_list_cell_badge[data-status='recoverable'] {
+  color: var(--c-warn);
+  background: var(--c-warn-bg);
+  border: 1px solid var(--c-warn-border);
+}
+
+.container_task_list_cell_detail {
+  display: inline-flex;
+  align-items: center;
 }
 
 .container_task_list_cell_cancel {
   padding: var(--sp-1) 10px;
-  color: var(--c-danger);
-  border: 1px solid var(--c-danger);
+  color: var(--c-warn-text);
+  background: var(--c-surface-sub);
+  border: 1px solid var(--c-warn);
+  border-radius: var(--r-sm);
 }
 
 .container_task_list_cell_actiongroup {
@@ -304,9 +352,11 @@ onMounted(refresh)
 
 .container_task_list_cell_stop {
   padding: var(--sp-1) 10px;
+  font-weight: 600;
   color: var(--c-text-invert);
   background: var(--c-danger);
   border: 1px solid var(--c-danger);
+  border-radius: var(--r-sm);
 }
 
 .container_task_list_footer_pagination {

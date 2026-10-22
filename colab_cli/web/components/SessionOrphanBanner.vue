@@ -26,6 +26,7 @@ const count = computed(() => sessionStore.orphans.length)
   padding: 10px var(--sp-4);
   color: var(--c-text-invert);
   background: var(--c-danger);
+  box-shadow: var(--c-danger-glow);
 }
 
 .container_session_reconcile_panel_text {
@@ -33,20 +34,20 @@ const count = computed(() => sessionStore.orphans.length)
   font-weight: 600;
 }
 
-/* 红底横幅里的白色药丸按钮。必须显式写 :hover —— 否则 main.css 的
-   `a:hover` 会把它改成品牌蓝，在红底上既刺眼又丢了「危险」语义。 */
+/* 危险横幅里的处理按钮 */
 .container_session_reconcile_panel_action {
   padding: var(--sp-1) 14px;
   font-weight: 600;
   color: var(--c-danger);
   text-decoration: none;
   background: var(--c-surface);
+  border: 1px solid var(--c-danger);
   border-radius: var(--r-sm);
-  transition: background-color var(--t-fast);
+  transition: background-color var(--t-fast), color var(--t-fast);
 }
 
 .container_session_reconcile_panel_action:hover {
-  color: var(--c-danger-hover);
-  background: var(--c-danger-bg);
+  color: var(--c-text-invert);
+  background: var(--c-danger-hover);
 }
 </style>

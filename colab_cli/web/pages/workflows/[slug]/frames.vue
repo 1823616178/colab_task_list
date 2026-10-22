@@ -156,10 +156,10 @@ onMounted(async () => {
   padding: 20px;
   background: var(--c-surface);
   border: 1px solid var(--c-border);
+  border-top: 2px solid var(--c-brand);
   border-radius: var(--r-md);
-  box-shadow: var(--sh-1);
+  box-shadow: var(--sh-2);
 }
-
 
 .container_workflow_frames_form_error {
   margin: 0;
@@ -173,10 +173,20 @@ onMounted(async () => {
 }
 
 .container_workflow_frames_footer_submit {
-  padding: 10px 0;
+  padding: 12px 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
   color: var(--c-text-invert);
   background: var(--c-brand);
   border: none;
+  border-radius: var(--r-sm);
+  box-shadow: var(--sh-glow-brand);
+  transition: filter var(--t-fast), transform var(--t-fast);
+}
+
+.container_workflow_frames_footer_submit:hover:not(:disabled) {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
 }
 
 </style>

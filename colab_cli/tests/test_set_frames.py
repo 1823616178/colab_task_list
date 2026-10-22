@@ -185,6 +185,55 @@ def test_first_only_workflow_accepts_first(tmp_path):
     assert workflow["114"]["inputs"]["image"] == "first.png"
 
 
+def test_first_frame_through_scale_node_updates_source_image(tmp_path):
+    """The first-frame workflow routes LoadImage 114 through scale node 119."""
+    api_json = build_first_only_api_json(tmp_path)
+    workflow = json.loads(api_json.read_text(encoding="utf-8"))
+    workflow["119"] = {
+        "inputs": {"image": ["114", 0], "megapixels": 0.4},
+        "class_type": "ImageScaleToTotalPixels",
+    }
+    workflow["105:104"]["inputs"]["first_frame"] = ["119", 0]
+    api_json.write_text(json.dumps(workflow), encoding="utf-8")
+
+    first = tmp_path / "replacement.jpg"
+    first.write_bytes(b"new-image")
+    set_frames.main([
+        "--first", str(first),
+        "--api-json", str(api_json),
+        "--image-dir", str(tmp_path / "image"),
+    ])
+
+    updated = json.loads(api_json.read_text(encoding="utf-8"))
+    assert updated["114"]["inputs"]["image"] == "replacement.jpg"
+    assert updated["119"]["inputs"]["image"] == ["114", 0]
+
+
+def test_repo_first_frame_workflow_traces_to_load_image():
+    """The shipped first-frame graph resolves scale node 119 to image node 114."""
+    api_json = (
+        Path(__file__).resolve().parent.parent
+        / "flows" / "video_minimax_h3_t2v_首帧.json"
+    )
+    workflow = json.loads(api_json.read_text(encoding="utf-8"))
+    assert set_frames.find_frame_nodes(workflow, ["first"]) == {"first": "114"}
+
+
+def test_first_frame_does_not_follow_unrelated_nodes(tmp_path):
+    """Only known image transforms are followed when locating the source."""
+    api_json = build_first_only_api_json(tmp_path)
+    workflow = json.loads(api_json.read_text(encoding="utf-8"))
+    workflow["119"] = {
+        "inputs": {"image": ["114", 0]},
+        "class_type": "OtherNode",
+    }
+    workflow["105:104"]["inputs"]["first_frame"] = ["119", 0]
+    api_json.write_text(json.dumps(workflow), encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="无法追踪到 LoadImage"):
+        set_frames.find_frame_nodes(workflow, ["first"])
+
+
 def test_repo_api_json_has_last_frame_wiring():
     """P5：仓库根 api.json 已恢复 MiniMaxH3 last_frame → LoadImage 122。"""
     api_json = Path(__file__).resolve().parent.parent.parent / "api.json"

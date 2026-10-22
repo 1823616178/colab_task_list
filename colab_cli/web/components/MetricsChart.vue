@@ -138,13 +138,13 @@ function shortTime(value: string | null): string {
 }
 
 .container_task_detail_metrics_area {
-  fill: rgb(22 93 255 / 12%);
+  fill: var(--c-brand-bg);
 }
 
 .container_task_detail_metrics_gpu {
   fill: none;
   stroke: var(--c-brand);
-  stroke-width: 1.5;
+  stroke-width: 2;
 }
 
 .container_task_detail_metrics_vram {
@@ -156,15 +156,21 @@ function shortTime(value: string | null): string {
 .container_task_detail_metrics_legend {
   display: flex;
   gap: var(--sp-4);
-  margin-top: var(--sp-2);
+  align-items: center;
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--c-divider);
   font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .container_task_detail_metrics_gpukey {
+  font-weight: 600;
   color: var(--c-brand);
 }
 
 .container_task_detail_metrics_vramkey {
+  font-weight: 600;
   color: var(--c-warn);
 }
 

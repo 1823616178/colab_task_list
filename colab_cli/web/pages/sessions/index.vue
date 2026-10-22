@@ -279,8 +279,10 @@ async function onStopByEndpoint(item: SessionItem) {
             <td class="container_session_list_cell_name" :title="item.endpoint ?? ''">
               {{ item.name }}
             </td>
-            <td class="container_session_list_cell_status" :data-status="rowState(item)">
-              {{ statusText(item) }}
+            <td class="container_session_list_cell_status">
+              <span class="container_session_list_cell_badge" :data-status="rowState(item)">
+                {{ statusText(item) }}
+              </span>
             </td>
             <td class="container_session_list_cell_gpu">{{ acceleratorText(item) }}</td>
             <td class="container_session_list_cell_task">
@@ -395,6 +397,15 @@ async function onStopByEndpoint(item: SessionItem) {
   box-shadow: var(--sh-1);
 }
 
+.container_session_list_row_head th {
+  vertical-align: middle;
+}
+
+.container_session_list_row_item,
+.container_session_list_row_item td {
+  vertical-align: middle;
+}
+
 .container_session_list_row_item[data-status='orphan'] {
   background: var(--c-danger-bg);
   box-shadow: inset 3px 0 0 var(--c-danger);
@@ -403,30 +414,61 @@ async function onStopByEndpoint(item: SessionItem) {
 .container_session_list_cell_empty {
   color: var(--c-text-weak);
   text-align: center;
+  vertical-align: middle;
 }
 
-.container_session_list_cell_status[data-status='alive'] {
-  color: var(--c-success);
+.container_session_list_cell_status {
+  vertical-align: middle;
 }
 
-.container_session_list_cell_status[data-status='orphan'],
-.container_session_list_cell_status[data-status='unreachable'] {
-  color: var(--c-danger);
+.container_session_list_cell_badge {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: var(--fs-xs);
   font-weight: 600;
+  border-radius: var(--r-sm);
+  vertical-align: middle;
 }
 
-.container_session_list_cell_status[data-status='stopped'] {
+.container_session_list_cell_badge[data-status='alive'] {
+  color: var(--c-success);
+  background: var(--c-success-bg);
+}
+
+.container_session_list_cell_badge[data-status='orphan'] {
+  color: var(--c-danger);
+  background: var(--c-danger-bg);
+  border: 1px solid var(--c-danger);
+}
+
+.container_session_list_cell_badge[data-status='unreachable'] {
+  color: var(--c-danger);
+  background: var(--c-danger-bg);
+}
+
+.container_session_list_cell_badge[data-status='stopped'] {
   color: var(--c-text-weak);
+  background: var(--c-surface-sub);
 }
 
 .container_session_list_cell_name {
-  font-weight: 500;
+  font-family: var(--ff-mono);
+  font-weight: 600;
+  color: var(--c-text);
 }
 
 .container_session_list_cell_stop {
   padding: var(--sp-1) 10px;
-  color: var(--c-danger);
+  font-weight: 600;
+  color: var(--c-text-invert);
+  background: var(--c-danger);
   border: 1px solid var(--c-danger);
+  border-radius: var(--r-sm);
+  transition: filter var(--t-fast);
+}
+
+.container_session_list_cell_stop:hover:not(:disabled) {
+  filter: brightness(1.15);
 }
 
 .container_session_list_footer_note {
@@ -451,7 +493,9 @@ async function onStopByEndpoint(item: SessionItem) {
 .container_session_create_header_title {
   width: 100%;
   margin: 0 0 var(--sp-1);
-  font-size: 15px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--c-text);
 }
 
 .container_session_create_form_name,
@@ -474,9 +518,17 @@ async function onStopByEndpoint(item: SessionItem) {
 
 .container_session_create_footer_start {
   padding: var(--sp-2) var(--sp-4);
+  font-weight: 600;
   color: var(--c-text-invert);
   background: var(--c-brand);
   border: none;
+  border-radius: var(--r-sm);
+  box-shadow: var(--sh-glow-brand);
+  transition: filter var(--t-fast);
+}
+
+.container_session_create_footer_start:hover:not(:disabled) {
+  filter: brightness(1.1);
 }
 
 .container_session_list_panel_log {
@@ -490,7 +542,9 @@ async function onStopByEndpoint(item: SessionItem) {
 
 .container_session_list_header_log {
   margin: 0 0 var(--sp-2);
-  font-size: 15px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--c-text);
 }
 
 .container_session_list_panel_logtext {
@@ -498,11 +552,12 @@ async function onStopByEndpoint(item: SessionItem) {
   padding: var(--sp-2) 10px;
   margin: 0 0 var(--sp-2);
   overflow: auto;
-  color: var(--c-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--c-log-text);
+  font-family: var(--ff-mono);
   font-size: var(--fs-xs);
   white-space: pre-wrap;
-  background: var(--c-surface-hover);
+  background: var(--c-log-bg);
+  border: 1px solid var(--c-border);
   border-radius: var(--r-sm);
 }
 

@@ -378,9 +378,17 @@ onMounted(() => {
 
 .container_user_create_form_submit {
   padding: var(--sp-2) var(--sp-4);
+  font-weight: 600;
   color: var(--c-text-invert);
   background: var(--c-brand);
   border: none;
+  border-radius: var(--r-sm);
+  box-shadow: var(--sh-glow-brand);
+  transition: filter var(--t-fast);
+}
+
+.container_user_create_form_submit:hover:not(:disabled) {
+  filter: brightness(1.1);
 }
 
 .container_user_list_form_error {
@@ -452,11 +460,13 @@ onMounted(() => {
 .container_user_audit_header_title {
   margin: 0;
   margin-right: auto;
-  font-size: 17px;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--c-text);
 }
 
 .container_user_audit_cell_action {
-  font-family: monospace;
+  font-family: var(--ff-mono);
   font-size: var(--fs-xs);
 }
 

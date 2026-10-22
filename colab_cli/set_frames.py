@@ -28,6 +28,9 @@ IMAGE_EXTENSIONS = {
 }
 GENERATOR_CLASS_TYPE = "MiniMaxH3ImageToVideo"
 FRAME_FIELDS = {"first": "first_frame", "last": "last_frame"}
+IMAGE_TRANSFORM_CLASS_TYPES = {
+    "ImageScaleToTotalPixels", "ImageScale", "ImageScaleBy",
+}
 
 
 def copy_to_image_dir(source, image_dir):
@@ -86,12 +89,28 @@ def find_frame_nodes(workflow, keys):
                 "无法更新该帧"
             )
         node_id = reference[0]
-        node = workflow.get(node_id)
-        if not isinstance(node, dict) or node.get("class_type") != "LoadImage":
+        visited = set()
+        while node_id not in visited:
+            visited.add(node_id)
+            node = workflow.get(node_id)
+            if not isinstance(node, dict):
+                break
+            if node.get("class_type") == "LoadImage":
+                frame_nodes[key] = node_id
+                break
+            if node.get("class_type") not in IMAGE_TRANSFORM_CLASS_TYPES:
+                break
+            image_input = node.get("inputs", {}).get("image")
+            if (not isinstance(image_input, list) or len(image_input) != 2
+                    or not isinstance(image_input[0], str)):
+                break
+            node_id = image_input[0]
+        else:
+            sys.exit(f"错误: {field} 的图像连线存在循环")
+        if key not in frame_nodes:
             sys.exit(
-                f"错误: {field} 引用的节点 {node_id} 不是 LoadImage 节点"
+                f"错误: {field} 引用的节点 {node_id} 无法追踪到 LoadImage 节点"
             )
-        frame_nodes[key] = node_id
     return frame_nodes
 
 

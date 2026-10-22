@@ -159,7 +159,7 @@ python run_cloud.py -t repo dataset \
 1. 复制仓库到 staging；
 2. 忽略 `.git`、Python 缓存和测试缓存；
 3. 让 Kaggle CLI 把仓库子目录上传为 ZIP；
-4. 把提示词写入 `codegen-job.json`；
+4. 把提示词与运行期配置写入 `codegen-job.json`（`repo_name` 总会写入）；
 5. 创建默认私有的 Dataset。
 
 出现确认提示时，在另一个终端检查 staging 内容；也可以先输入 `n` 取消，检查后再运行一次：
@@ -181,9 +181,9 @@ python run_cloud.py -t repo push \
 
 注意：以后每次重新 push 都必须再次传 `--dataset`。省略它会解除之前的数据集挂载。
 
-云端 `run` 命令本身不能接收 `-p`。云端使用的是 Dataset 中的
-`codegen-job.json`，所以 `local` 和 `dataset` 应传入相同提示词或相同
-`--prompt-file`。
+云端 `run` 命令本身不能接收 `-p`、`--verify` 这类配置。云端读的是 Dataset 中的
+`codegen-job.json`，所以 `local` 与 `dataset` 应传入相同的提示词和相同的
+`--verify` / `--protected` / `--max-rounds`，否则本地跑通的配置不会带到云端。
 
 ### 第四步：云端运行
 
@@ -248,35 +248,30 @@ workspace/         修改后的完整仓库副本
 /absolute/path/my-project
 ```
 
-### 第一步：修改任务配置
+### 第一步：确定任务配置
 
-打开 `tasks/repo_task.py`，调整顶部配置区。`SPEC` 现在是没有传提示词参数时的兜底值：
+`tasks/repo_task.py` 顶部的 `DEFAULT_*` 只是兜底值，**不需要为每个仓库去改源码**
+（云端任务一旦 push 就删不掉，改一次配置就多留一条永久记录）。四项配置都能在运行时
+覆盖，本地走命令行参数，云端走 Dataset 里的 `codegen-job.json`：
 
-```python
-REPO_NAME = "my-project"
-
-SPEC = """\
-修复订单导入模块当前失败的测试。
-
-要求:
-- 只修改 src/ 下的实现
-- 不要修改 tests/
-- 保持公开接口兼容
-"""
-
-VERIFY_COMMAND = [sys.executable, "-m", "pytest", "-q"]
-
-PROTECTED_PREFIXES = ("tests/", "pytest.ini", ".env")
-```
+| 覆盖项 | `local` / `dataset` 参数 | 默认值 | 说明 |
+|---|---|---|---|
+| 提示词 | `-p` / `--prompt-file` | 内置 `DEFAULT_SPEC` | 交给编码 agent 的真实需求，写清范围和验收标准 |
+| 验收命令 | `--verify` | `python -m pytest -q` | 一行 shell 风格字符串，按 `shlex` 拆成参数列表；不支持管道和重定向，需要就写进脚本再调脚本 |
+| 受保护路径 | `--protected` | `tests/,pytest.ini` | 逗号分隔的路径前缀；传空串 `""` 表示全部可写，仓库要从零生成时才这么做 |
+| 工具轮数上限 | `--max-rounds` | `16` | 只够改几个文件；仓库越大越要往上调 |
+| 仓库目录名 | 不用传 | `example_repo` | `dataset` 会自动把实际上传的目录名写进 `codegen-job.json`，云端据此在 `/kaggle/input` 下定位 |
 
 配置规则：
 
-- `REPO_NAME` 必须与本地仓库目录名完全一致；
-- `SPEC` 是交给编码 agent 的真实需求，应写清范围和验收标准；
-- `VERIFY_COMMAND` 必须是参数列表，不是带管道或重定向的 shell 字符串；
-- `PROTECTED_PREFIXES` 至少保护测试、密钥、生成基线和不能修改的配置；
+- `--protected` 至少保护测试、密钥、生成基线和不能修改的配置，否则模型可以改测试蒙混过关；
+- 放开 `--protected` 不会放开路径越界防护，工作区外始终写不进去；
 - 目前每个文件最多读取 60 KB，超大文件不会完整提供给模型；
 - 当前 runner 不会自动安装项目依赖。
+
+本地想临时换一项而不重新上传 Dataset，可以直接设环境变量：`CODEGEN_PROMPT`、
+`CODEGEN_VERIFY`、`CODEGEN_PROTECTED`、`CODEGEN_MAX_ROUNDS`、`CODEGEN_REPO_NAME`。
+环境变量优先级高于 `codegen-job.json`。
 
 如果项目依赖不在 Kaggle 默认镜像里，先不要直接云端运行。当前版本尚未提供受控的
 `SETUP_COMMAND`，也没有保证云端可以联网安装依赖。第一阶段建议选择依赖已经存在、
@@ -407,6 +402,41 @@ git diff
 新增或删除文件场景可能无法通过 diff 完整表达。遇到 `git apply --check` 失败时不要强行
 覆盖；对照下载结果里的 `workspace/` 手动审查相应文件。
 
+### 失败后代码在哪里
+
+`local` 的产物**始终**落在 `-o` 指定的目录里，通过与否都写：
+
+```text
+runs/<name>/
+├── workspace/          模型改完的完整代码树，直接能看能跑
+├── changes.diff        相对原始仓库的累计 diff
+├── verification.txt    验收命令、退出码和完整输出
+└── *.run.json          kbench 的运行记录，含完整对话
+```
+
+原始仓库不会被改动，要采纳得自己 `git apply changes.diff` 或从 `workspace/` 拷回去。
+
+云端 run 的这几样产物在 `/kaggle/working` 下，用 `download` 取回本地：
+
+```bash
+python run_cloud.py -t repo download -m <model> -o ./runs/cloud-01
+```
+
+**重跑会覆盖 `workspace/`。** 不加 `--resume` 时，任务启动第一件事就是删掉旧工作副本
+再从原始仓库重新复制——上一轮的成果在产出任何新东西之前就没了。想在上一轮基础上
+接着改，加 `--resume`；想留档，换一个 `-o` 目录。
+
+```bash
+# 接着上一轮改，验收命令和轮数照旧要给
+python run_cloud.py -t repo local --repo ./examples/psv_quota \
+  --prompt-file ./next-step.md --output ./runs/psv-quota-local-01 --resume \
+  --verify "bash scripts/test.sh" --protected "" --max-rounds 120
+```
+
+`--resume` 只影响工作副本，`changes.diff` 的基准始终是原始仓库，所以多轮下来 diff 是
+累计的，不是增量的。云端没有这个参数：每次 run 都是全新容器，只能靠 Dataset 传入上一
+轮的成果。
+
 ### 运行产物管理
 
 默认本地输出、Dataset staging 和云端下载分别位于：
@@ -434,7 +464,7 @@ Kaggle Dataset 默认是私有的，但代码仍然会离开本机并保存在�
 - 指向仓库外部敏感位置的符号链接。
 
 更稳妥的做法是先制作一个专门用于上传的干净代码副本，再把这个副本传给 `--repo`。
-注意副本目录名仍须与 `REPO_NAME` 一致。
+副本目录名可以随意，`dataset` 会把它写进 `codegen-job.json` 的 `repo_name`。
 
 永远不要执行 `kaggle b t publish`。发布操作会把任务从私有改成公开。
 
@@ -462,8 +492,8 @@ kaggle b auth -y
 
 依次检查：
 
-1. `REPO_NAME` 是否等于仓库目录名；
-2. Dataset 文件列表里是否存在 `<REPO_NAME>.zip`；
+1. Dataset 里 `codegen-job.json` 的 `repo_name` 是否等于上传的仓库目录名；
+2. Dataset 文件列表里是否存在 `<repo_name>.zip`；
 3. push 是否传了正确的 `--dataset owner/slug`；
 4. 更新 Dataset 后是否重新 push 任务；
 5. 日志中的 `/kaggle/input` 是否挂载成功。
@@ -486,8 +516,8 @@ Kaggle CLI 有 delete 命令外壳，但服务端目前不支持删除任务及�
 ## 8. 每次运行检查表
 
 ```text
-[ ] REPO_NAME、VERIFY_COMMAND 和提示词正确
-[ ] local 与 dataset 使用了同一份提示词
+[ ] 提示词、--verify、--protected、--max-rounds 都符合这个仓库
+[ ] local 与 dataset 使用了同一份提示词和同一组配置
 [ ] 本地 local 运行通过
 [ ] staging 中没有密钥、个人数据和大型无关文件
 [ ] Dataset 创建或更新成功
@@ -566,8 +596,12 @@ python run_cloud.py [-t TASK] local \
 | `-r`, `--repo` | 无 | `repo` | 本地仓库目录；`repo` 任务通常必须传 |
 | `-s`, `--spec` | 无 | `spec` | 本地契约文档；设置运行时 `SPEC_PATH` |
 | `-o`, `--output` | `./runs/local` | 全部 | 工作目录和输出目录，自动创建 |
-| `-p`, `--prompt` | 内置 `SPEC` | 仅 `repo` | 直接传一段非空提示词 |
-| `--prompt-file` | 内置 `SPEC` | 仅 `repo` | 从 UTF-8 文件读取多行提示词 |
+| `--resume` | 关闭 | 仅 `repo` | 接着 `-o` 目录里上一轮的 `workspace/` 改，而不是从原始仓库重新复制 |
+| `-p`, `--prompt` | 内置 `DEFAULT_SPEC` | 仅 `repo` | 直接传一段非空提示词 |
+| `--prompt-file` | 内置 `DEFAULT_SPEC` | 仅 `repo` | 从 UTF-8 文件读取多行提示词 |
+| `--verify` | `python -m pytest -q` | 仅 `repo` | 验收命令，一行 shell 风格字符串 |
+| `--protected` | `tests/,pytest.ini` | 仅 `repo` | 不许模型修改的路径前缀，逗号分隔；`""` 表示不保护 |
+| `--max-rounds` | `16` | 仅 `repo` | 工具调用轮数上限 |
 
 `-p` 和 `--prompt-file` 互斥，不能同时出现。提示词参数传给 `spec` 或 `codegen` 会在
 启动任务前报错。`-r` 和 `-s` 虽能被解析器接受，但应只按上表用于对应任务。
@@ -649,8 +683,11 @@ python run_cloud.py [-t TASK] dataset \
 | `--update` | 关闭 | 使用 `datasets version` 更新已有 Dataset |
 | `-m`, `--message` | `update` | `--update` 时的版本说明；首次创建不会使用 |
 | `-y`, `--yes` | 关闭 | 跳过上传确认，适合已审查内容的脚本化运行 |
-| `-p`, `--prompt` | 内置 `SPEC` | 把短提示词写入 Dataset 的 `codegen-job.json` |
-| `--prompt-file` | 内置 `SPEC` | 把 UTF-8 多行提示词写入 `codegen-job.json` |
+| `-p`, `--prompt` | 内置 `DEFAULT_SPEC` | 把短提示词写入 Dataset 的 `codegen-job.json` |
+| `--prompt-file` | 内置 `DEFAULT_SPEC` | 把 UTF-8 多行提示词写入 `codegen-job.json` |
+| `--verify` | `python -m pytest -q` | 把验收命令写入 `codegen-job.json` |
+| `--protected` | `tests/,pytest.ini` | 把受保护路径前缀写入 `codegen-job.json` |
+| `--max-rounds` | `16` | 把工具轮数上限写入 `codegen-job.json` |
 
 脚本会忽略仓库中的 `.git`、`__pycache__`、`.pytest_cache` 和 `*.pyc`，生成
 `dataset-metadata.json`，然后通过 `--dir-mode zip` 上传仓库目录。Dataset 元数据当前固定
@@ -890,6 +927,10 @@ workspace/
 | `-o/--output` | 是 | 否 | 否 | 否 | 否 | 否 | 是 | 本地工作目录或下载目录 |
 | `-p/--prompt` | 是 | 是 | 否 | 否 | 否 | 否 | 否 | 仅 `repo local/dataset` |
 | `--prompt-file` | 是 | 是 | 否 | 否 | 否 | 否 | 否 | 仅 `repo local/dataset`，与 `-p` 互斥 |
+| `--verify` | 是 | 是 | 否 | 否 | 否 | 否 | 否 | 仅 `repo local/dataset` |
+| `--protected` | 是 | 是 | 否 | 否 | 否 | 否 | 否 | 仅 `repo local/dataset` |
+| `--max-rounds` | 是 | 是 | 否 | 否 | 否 | 否 | 否 | 仅 `repo local/dataset` |
+| `--resume` | 是 | 否 | 否 | 否 | 否 | 否 | 否 | 仅 `repo local`，云端每次都是新容器 |
 | `--slug/--owner` | 否 | 是 | 否 | 否 | 否 | 否 | 否 | Dataset 标识 |
 | `--staging` | 否 | 是 | 否 | 否 | 否 | 否 | 否 | Dataset 临时目录 |
 | `--update` | 否 | 是 | 否 | 否 | 否 | 否 | 否 | 更新已存在 Dataset |

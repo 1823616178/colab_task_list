@@ -118,6 +118,7 @@ async function resolveInputReference(
 
 function frameLabels(api: Record<string, unknown>): Map<string, string> {
   const labels = new Map<string, string>()
+  const imageTransforms = new Set(['ImageScaleToTotalPixels', 'ImageScale', 'ImageScaleBy'])
   for (const node of Object.values(api)) {
     if (typeof node !== 'object' || node === null) continue
     const record = node as Record<string, unknown>
@@ -127,7 +128,22 @@ function frameLabels(api: Record<string, unknown>): Map<string, string> {
     for (const [field, label] of [['first_frame', '首帧'], ['last_frame', '尾帧']] as const) {
       const connection = (inputs as Record<string, unknown>)[field]
       if (Array.isArray(connection) && typeof connection[0] === 'string') {
-        labels.set(connection[0], label)
+        let nodeId: string = connection[0]
+        const visited = new Set<string>()
+        while (!visited.has(nodeId)) {
+          visited.add(nodeId)
+          const upstream = api[nodeId]
+          if (typeof upstream !== 'object' || upstream === null) break
+          const imageNode = upstream as Record<string, unknown>
+          if (imageNode.class_type === 'LoadImage') {
+            labels.set(nodeId, label)
+            break
+          }
+          if (!imageTransforms.has(String(imageNode.class_type))) break
+          const imageInput = (imageNode.inputs as Record<string, unknown> | undefined)?.image
+          if (!Array.isArray(imageInput) || typeof imageInput[0] !== 'string') break
+          nodeId = imageInput[0]
+        }
       }
     }
   }

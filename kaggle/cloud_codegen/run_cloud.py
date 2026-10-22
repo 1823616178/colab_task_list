@@ -61,6 +61,34 @@ def add_prompt_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--prompt-file", default=None, help="UTF-8 多行提示词文件")
 
 
+def add_job_arguments(parser: argparse.ArgumentParser) -> None:
+    """repo 任务的运行期覆盖项, 免得换个仓库就得改 tasks/repo_task.py。"""
+    parser.add_argument(
+        "--verify", default=None,
+        help="验收命令(一行 shell 风格), 默认 python -m pytest -q",
+    )
+    parser.add_argument(
+        "--protected", default=None,
+        help="不许模型改的路径前缀, 逗号分隔; 传空串表示都能改(仓库从零生成时用)",
+    )
+    parser.add_argument(
+        "--max-rounds", type=int, default=None,
+        help="工具调用轮数上限, 默认 16; 从零生成整个仓库要往上调",
+    )
+
+
+def job_overrides(args: argparse.Namespace) -> dict:
+    """收集命令行上给出的 job 覆盖项, 没给的键不出现。"""
+    overrides: dict[str, object] = {}
+    if args.verify is not None:
+        overrides["verify_command"] = args.verify
+    if args.protected is not None:
+        overrides["protected_prefixes"] = args.protected
+    if args.max_rounds is not None:
+        overrides["max_tool_rounds"] = args.max_rounds
+    return overrides
+
+
 def build_proxy_environment() -> dict[str, str]:
     """复用 kllm 的凭据管理, 组出本地跑任务所需的环境变量。"""
     sys.path.insert(0, str(HERE.parent))
@@ -107,6 +135,14 @@ def command_local(args: argparse.Namespace) -> int:
         environment["SPEC_PATH"] = str(Path(args.spec).resolve())
     if prompt is not None:
         environment["CODEGEN_PROMPT"] = prompt
+    if args.verify is not None:
+        environment["CODEGEN_VERIFY"] = args.verify
+    if args.protected is not None:
+        environment["CODEGEN_PROTECTED"] = args.protected
+    if args.max_rounds is not None:
+        environment["CODEGEN_MAX_ROUNDS"] = str(args.max_rounds)
+    if args.resume:
+        environment["CODEGEN_RESUME"] = "1"
 
     work_directory = Path(args.output).resolve()
     work_directory.mkdir(parents=True, exist_ok=True)
@@ -174,11 +210,14 @@ def command_dataset(args: argparse.Namespace) -> int:
         json.dumps({"title": slug, "id": f"{owner}/{slug}", "licenses": [{"name": "CC0-1.0"}]},
                    indent=2)
     )
+    # 云端靠 repo_name 在 /kaggle/input 下找仓库, 这里直接写死成实际上传的目录名,
+    # 免得云端 REPO_NAME 与数据集内容对不上。
+    job = {"repo_name": repository.name, **job_overrides(args)}
     if prompt is not None:
-        (staging / CODEGEN_JOB_FILE).write_text(
-            json.dumps({"prompt": prompt}, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        job["prompt"] = prompt
+    (staging / CODEGEN_JOB_FILE).write_text(
+        json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
     print(f"⚠ 这会把 {repository} 的内容上传到 Kaggle(私有数据集 {owner}/{slug})。")
     if not args.yes:
@@ -260,7 +299,12 @@ def build_parser() -> argparse.ArgumentParser:
     local_parser.add_argument("-r", "--repo", default=None, help="仓库路径(repo 任务用)")
     local_parser.add_argument("-s", "--spec", default=None, help="契约文档路径(spec 任务用)")
     local_parser.add_argument("-o", "--output", default=str(RUNS_DIRECTORY / "local"))
+    local_parser.add_argument(
+        "--resume", action="store_true",
+        help="接着 -o 目录里上一轮的 workspace 改, 而不是从原始仓库重新复制",
+    )
     add_prompt_arguments(local_parser)
+    add_job_arguments(local_parser)
     local_parser.set_defaults(handler=command_local)
 
     dataset_parser = subparsers.add_parser("dataset", help="把仓库上传为私有数据集")
@@ -272,6 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_parser.add_argument("-m", "--message", default="update")
     dataset_parser.add_argument("-y", "--yes", action="store_true")
     add_prompt_arguments(dataset_parser)
+    add_job_arguments(dataset_parser)
     dataset_parser.set_defaults(handler=command_dataset)
 
     push_parser = subparsers.add_parser("push", help="推送任务(永久, 不可删除)")

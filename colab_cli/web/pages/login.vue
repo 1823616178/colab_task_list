@@ -1,11 +1,17 @@
 <script setup lang="ts">
 import type { Ref } from 'vue'
 import { extractApiError, useAuthStore } from '~/stores/auth'
+import { useUiStore } from '~/stores/ui'
 
 // /login：唯一免 JWT 页（doc/04 §2）。登录成功且 mustChangePassword 时进入首次改密步骤。
 const authStore = useAuthStore()
+const uiStore = useUiStore()
 
 const mode = ref<'login' | 'changePassword'>('login')
+
+onMounted(() => {
+  uiStore.initTheme()
+})
 
 // 首次登录会就地切到改密步骤，标签页标题跟着走
 useHead({ title: () => (mode.value === 'login' ? '登录' : '修改密码') })
@@ -91,26 +97,43 @@ async function onChangePassword() {
 
 <template>
   <div class="container_login_auth_body_root">
+    <button
+      class="container_login_auth_header_theme"
+      type="button"
+      :title="uiStore.theme === 'light' ? '切换到夜间模式' : '切换到白天模式'"
+      :aria-label="uiStore.theme === 'light' ? '切换到夜间模式' : '切换到白天模式'"
+      @click="uiStore.toggleTheme()"
+    >
+      <span aria-hidden="true">{{ uiStore.theme === 'light' ? '☀️' : '🌙' }}</span>
+      <span>{{ uiStore.theme === 'light' ? '白天' : '夜间' }}</span>
+    </button>
     <form
       v-if="mode === 'login'"
       class="container_login_auth_form_root"
       @submit.prevent="onLogin"
     >
-      <h1 class="container_login_auth_header_title">Colab 控制台</h1>
+      <div class="container_login_auth_panel_hero">
+        <span class="container_login_auth_hero_logo" aria-hidden="true">◆</span>
+        <h1 class="container_login_auth_hero_title">COLAB 任务指挥台</h1>
+        <p class="container_login_auth_hero_desc">
+          云端算力调度中枢 · 实例托管与自愈
+        </p>
+      </div>
+
       <label class="container_login_auth_form_username">
         用户名
-        <input ref="usernameEl" v-model="username" type="text" autocomplete="username" required>
+        <input ref="usernameEl" v-model="username" type="text" autocomplete="username" placeholder="请输入操作员账号" required>
       </label>
       <label class="container_login_auth_form_password">
         密码
-        <input ref="passwordEl" v-model="password" type="password" autocomplete="current-password" required>
+        <input ref="passwordEl" v-model="password" type="password" autocomplete="current-password" placeholder="请输入访问密钥" required>
       </label>
       <p v-if="errorMessage" class="container_login_auth_form_error" data-state="error">
         {{ errorMessage }}
       </p>
       <p v-if="noticeMessage" class="container_login_auth_form_notice">{{ noticeMessage }}</p>
       <button class="container_login_auth_footer_submit" type="submit" :disabled="submitting">
-        {{ submitting ? '登录中…' : '登录' }}
+        {{ submitting ? '验证中…' : '登入控制台' }}
       </button>
     </form>
 
@@ -119,21 +142,28 @@ async function onChangePassword() {
       class="container_login_auth_form_root"
       @submit.prevent="onChangePassword"
     >
-      <h1 class="container_login_auth_header_title">修改密码</h1>
+      <div class="container_login_auth_panel_hero">
+        <span class="container_login_auth_hero_logo" aria-hidden="true">◆</span>
+        <h1 class="container_login_auth_hero_title">首次登录修改密码</h1>
+        <p class="container_login_auth_hero_desc">
+          安全规范要求：首次接入须更新访问密码
+        </p>
+      </div>
+
       <label class="container_login_auth_form_newpassword">
         新密码
-        <input ref="newPasswordEl" v-model="newPassword" type="password" autocomplete="new-password" required>
+        <input ref="newPasswordEl" v-model="newPassword" type="password" autocomplete="new-password" placeholder="不少于 8 位字符" required>
       </label>
       <label class="container_login_auth_form_confirmpassword">
         确认新密码
-        <input ref="confirmPasswordEl" v-model="confirmPassword" type="password" autocomplete="new-password" required>
+        <input ref="confirmPasswordEl" v-model="confirmPassword" type="password" autocomplete="new-password" placeholder="再次输入新密码" required>
       </label>
       <p v-if="errorMessage" class="container_login_auth_form_error" data-state="error">
         {{ errorMessage }}
       </p>
       <p v-if="noticeMessage" class="container_login_auth_form_notice">{{ noticeMessage }}</p>
       <button class="container_login_auth_footer_submit" type="submit" :disabled="submitting">
-        {{ submitting ? '提交中…' : '修改密码' }}
+        {{ submitting ? '提交中…' : '更新密码并继续' }}
       </button>
     </form>
   </div>
@@ -145,30 +175,52 @@ async function onChangePassword() {
   align-items: center;
   justify-content: center;
   min-height: 100vh;
+  min-height: 100dvh;
+  padding: var(--sp-6) var(--sp-4);
 }
 
 .container_login_auth_form_root {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
-  width: 360px;
+  width: 100%;
+  max-width: 400px;
   padding: var(--sp-8);
+  margin: auto;
   background: var(--c-surface);
   border: 1px solid var(--c-border);
+  border-top: 2px solid var(--c-brand);
   border-radius: var(--r-md);
-
-  /* 登录页是整个控制台的门面，也是唯一一张浮在空背景上的卡片，
-     用最重的一档投影把它托起来（其余卡片一律 --sh-1）。 */
   box-shadow: var(--sh-3);
 }
 
-
-.container_login_auth_header_title {
-  margin: 0 0 var(--sp-2);
-  font-size: var(--fs-2xl);
-  font-weight: 600;
-  letter-spacing: 0.5px;
+.container_login_auth_panel_hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: var(--sp-2);
   text-align: center;
+}
+
+.container_login_auth_hero_logo {
+  font-size: var(--fs-3xl);
+  line-height: 1;
+  color: var(--c-brand);
+  text-shadow: var(--c-brand-glow);
+}
+
+.container_login_auth_hero_title {
+  margin: var(--sp-2) 0 var(--sp-1);
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--c-text);
+}
+
+.container_login_auth_hero_desc {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-sub);
 }
 
 .container_login_auth_form_username,
@@ -178,31 +230,78 @@ async function onChangePassword() {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--c-text-sub);
 }
 
 .container_login_auth_form_username input,
 .container_login_auth_form_password input,
 .container_login_auth_form_newpassword input,
 .container_login_auth_form_confirmpassword input {
-  padding: var(--sp-2) 10px;
+  padding: 10px 12px;
+  font-size: var(--fs-md);
 }
 
 .container_login_auth_form_error {
   margin: 0;
+  padding: 8px 12px;
+  font-size: var(--fs-xs);
   color: var(--c-danger);
+  background: var(--c-danger-bg);
+  border: 1px solid var(--c-danger);
+  border-radius: var(--r-sm);
 }
 
 .container_login_auth_form_notice {
   margin: 0;
+  padding: 8px 12px;
+  font-size: var(--fs-xs);
   color: var(--c-success);
+  background: var(--c-success-bg);
+  border: 1px solid var(--c-success);
+  border-radius: var(--r-sm);
 }
 
 .container_login_auth_footer_submit {
-  padding: 10px 0;
-  font-weight: 500;
+  padding: 12px 0;
+  margin-top: var(--sp-2);
+  font-size: var(--fs-md);
+  font-weight: 600;
   color: var(--c-text-invert);
   background: var(--c-brand);
   border: none;
+  border-radius: var(--r-sm);
+  box-shadow: var(--sh-glow-brand);
+  transition: filter var(--t-fast), transform var(--t-fast);
 }
 
+.container_login_auth_footer_submit:hover:not(:disabled) {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+
+.container_login_auth_header_theme {
+  position: fixed;
+  top: var(--sp-4);
+  right: var(--sp-4);
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 12px;
+  font-size: var(--fs-xs);
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  box-shadow: var(--sh-1);
+  transition:
+    background-color var(--t-fast),
+    border-color var(--t-fast),
+    color var(--t-fast);
+}
+
+.container_login_auth_header_theme:hover {
+  color: var(--c-brand);
+  border-color: var(--c-brand);
+}
 </style>
