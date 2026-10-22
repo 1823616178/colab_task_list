@@ -114,3 +114,8 @@ kaggle kernels output <用户名>/<slug> -p out/
 ```
 
 详细字段说明和踩坑记录见 [操作手册.md](操作手册.md) 第 4、5 节。
+
+
+## 计算后端
+
+工作流可跑在 Colab（默认）/ Kaggle / Modal：`python colab_cli/run.py --backend modal ...`，或 Web 新建任务选「计算后端」。详见 [docs/BACKENDS.md](docs/BACKENDS.md) 与 [docs/MODAL.md](docs/MODAL.md)。
