@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import sys
 import time
@@ -13,7 +14,7 @@ from .. import __version__
 from ..common.config import AVAILABLE_MODELS, Settings, load_settings
 from ..common.errors import KaggleToolsError
 from ..common.logging import get_logger, setup_logging
-from ..common.retry import RetryPolicy, is_retryable_status
+from ..common.retry import policy_from_settings
 from .credentials import TokenManager
 from .usage import append_record, extract_record, format_report
 
@@ -28,9 +29,22 @@ def command_serve(args: argparse.Namespace, settings: Settings) -> int:
 
     host = args.host or settings.host
     port = args.port or settings.port
+    if settings.local_key is None and not is_loopback(host):
+        if not args.insecure:
+            print(
+                f"拒绝启动: 监听 {host} 会把网关暴露给其它机器, 但没有设置 KLLM_LOCAL_KEY,\n"
+                "任何能访问这台机器的人都能消耗你的 Kaggle 额度。\n"
+                "请设置 KLLM_LOCAL_KEY, 或确认风险后加 --insecure。",
+                file=sys.stderr,
+            )
+            return 2
+        print(f"⚠ --insecure: 在 {host} 上无密钥开放网关, 请确认只有可信网络能访问。",
+              file=sys.stderr)
     print(f"kllm 网关: http://{host}:{port}/v1")
     if settings.local_key is None:
-        print("未设置 KLLM_LOCAL_KEY, 本机任意进程都可调用(仅监听回环地址)。")
+        print("未设置 KLLM_LOCAL_KEY, 本机任意进程都可调用。")
+    if settings.fallback_models:
+        print(f"备用模型: {', '.join(settings.fallback_models)}")
     uvicorn.run(create_app(settings), host=host, port=port,
                 log_level=settings.log_level.lower())
     return 0
@@ -60,12 +74,42 @@ def command_doctor(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def is_loopback(host: str) -> bool:
+    """host 是否只在本机可达。"""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
 def command_models(args: argparse.Namespace, settings: Settings) -> int:
-    """列出可用模型。"""
+    """列出可用模型; --check 时逐个真实调用一次(消耗少量额度)。"""
+    if not args.check:
+        for model in AVAILABLE_MODELS:
+            marker = " (默认)" if model == settings.default_model else ""
+            fallback = " (备用)" if model in settings.fallback_models else ""
+            print(f"{model}{marker}{fallback}")
+        return 0
+
+    credentials = TokenManager(settings).get()
+    failures = 0
     for model in AVAILABLE_MODELS:
-        marker = " (默认)" if model == settings.default_model else ""
-        print(f"{model}{marker}")
-    return 0
+        started = time.perf_counter()
+        try:
+            response = chat_once(credentials, model, "Reply with exactly: OK", settings)
+            ok = response.status_code == 200
+            detail = f"HTTP {response.status_code}"
+            if not ok:
+                detail += f" {response.text[:120]!r}"
+        except KaggleToolsError as error:
+            ok, detail = False, str(error)
+        elapsed = time.perf_counter() - started
+        failures += not ok
+        print(f"{'✅' if ok else '❌'} {model:<42} {elapsed:5.1f}s  {detail}")
+    print(f"\n{len(AVAILABLE_MODELS) - failures}/{len(AVAILABLE_MODELS)} 个模型可用。")
+    return 0 if failures == 0 else 1
 
 
 def command_ask(args: argparse.Namespace, settings: Settings) -> int:
@@ -89,15 +133,16 @@ def command_ask(args: argparse.Namespace, settings: Settings) -> int:
 
 def command_usage(args: argparse.Namespace, settings: Settings) -> int:
     """打印用量账本汇总。"""
-    print(format_report(settings.usage_path))
+    print(format_report(settings.usage_path, settings.tzinfo,
+                        settings.daily_limit_dollars, settings.monthly_limit_dollars))
     return 0
 
 
 def chat_once(credentials, model: str, prompt: str, settings: Settings,
               transport: httpx.BaseTransport | None = None,
               sleep=time.sleep) -> httpx.Response:
-    """向代理发一次非流式 chat/completions; 429/5xx/网络错误按策略重试。"""
-    policy = RetryPolicy(settings.max_retries, settings.retry_base_delay, settings.retry_max_delay)
+    """向代理发一次非流式 chat/completions; 按策略重试可安全重试的状态和连接错误。"""
+    policy = policy_from_settings(settings)
     with httpx.Client(timeout=settings.request_timeout_seconds, transport=transport) as client:
         attempt = 0
         while True:
@@ -111,12 +156,12 @@ def chat_once(credentials, model: str, prompt: str, settings: Settings,
                     json={"model": model, "messages": [{"role": "user", "content": prompt}]},
                 )
             except httpx.TransportError as error:
-                if attempt >= policy.max_retries:
+                if attempt >= policy.max_retries or not policy.should_retry_error(error):
                     raise KaggleToolsError(f"无法连接模型代理: {error}") from error
                 delay = policy.delay(attempt)
                 logger.warning("网络错误 %s, %.1fs 后重试", error, delay)
             else:
-                if not is_retryable_status(response.status_code) or attempt >= policy.max_retries:
+                if not policy.should_retry_status(response.status_code) or attempt >= policy.max_retries:
                     return response
                 delay = policy.delay(attempt, response.headers.get("retry-after"))
                 logger.warning("HTTP %s, %.1fs 后重试", response.status_code, delay)
@@ -137,6 +182,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser = subparsers.add_parser("serve", help="启动本地网关")
     serve_parser.add_argument("--host", default=None)
     serve_parser.add_argument("--port", type=int, default=None)
+    serve_parser.add_argument("--insecure", action="store_true",
+                              help="允许在非回环地址上无 KLLM_LOCAL_KEY 启动(危险)")
     serve_parser.set_defaults(handler=command_serve)
 
     doctor_parser = subparsers.add_parser("doctor", help="自检凭据与代理连通性")
@@ -144,6 +191,8 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.set_defaults(handler=command_doctor)
 
     models_parser = subparsers.add_parser("models", help="列出可用模型")
+    models_parser.add_argument("--check", action="store_true",
+                               help="逐个真实调用检查可用性(消耗少量额度)")
     models_parser.set_defaults(handler=command_models)
 
     ask_parser = subparsers.add_parser("ask", help="直接发一次提问")
