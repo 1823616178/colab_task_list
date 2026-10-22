@@ -8,7 +8,7 @@ from kaggle_tools.kllm.server import create_app
 from tests.unit.kllm.test_server import COMPLETION_BODY, FakeTokenManager
 
 
-def build(tmp_path, handler, max_retries=2):
+def build(tmp_path, handler, max_retries=2, **settings_overrides):
     """注入假上游; sleep 只记录等待秒数, 不真的睡。"""
     sleeps: list[float] = []
 
@@ -16,7 +16,7 @@ def build(tmp_path, handler, max_retries=2):
         sleeps.append(seconds)
 
     settings = Settings(cache_dir=tmp_path, max_retries=max_retries,
-                        retry_base_delay=0.5, retry_max_delay=8.0)
+                        retry_base_delay=0.5, retry_max_delay=8.0, **settings_overrides)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     app = create_app(settings=settings, token_manager=FakeTokenManager(),
                      http_client=client, sleep=fake_sleep)
@@ -78,11 +78,35 @@ def test_transient_network_error_recovers(tmp_path):
     def handler(request):
         calls.append(1)
         if len(calls) == 1:
-            raise httpx.ReadTimeout("timeout", request=request)
+            raise httpx.ConnectError("refused", request=request)
         return httpx.Response(200, json=COMPLETION_BODY)
 
     client, _ = build(tmp_path, handler)
     assert post(client).status_code == 200
+
+
+def test_read_timeout_is_not_retried_to_avoid_double_billing(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        raise httpx.ReadTimeout("timeout", request=request)
+
+    client, _ = build(tmp_path, handler, max_retries=3)
+    assert post(client).status_code == 502
+    assert len(calls) == 1
+
+
+def test_500_is_not_retried_by_default(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(500, json={"error": "boom"})
+
+    client, _ = build(tmp_path, handler, max_retries=3)
+    assert post(client).status_code == 500
+    assert len(calls) == 1
 
 
 def test_non_json_upstream_body_is_passed_through(tmp_path):

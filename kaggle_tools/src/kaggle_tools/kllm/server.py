@@ -3,14 +3,20 @@
 对外只暴露最小面: /v1/models 和 /v1/chat/completions, 请求体原样透传。
 可靠性策略:
 - 上游 401/403: 续期 token 后重试一次;
-- 上游 429/5xx: 按 Retry-After 或指数退避重试, 最多 settings.max_retries 次;
-- 网络错误(连接失败/超时): 同样重试, 最终返回 502 而不是 500;
-- 上游返回非 JSON: 原样透传字节, 不崩溃。
+- 上游 429/503(可配置 KLLM_RETRY_STATUSES): 按 Retry-After 或指数退避重试;
+  500/502 默认不重试, 因为上游可能已经处理并计费;
+- 连接类网络错误(请求未送达)重试, 最终返回 502; 读超时等不重试, 直接 502;
+- 首选模型仍失败(429/5xx/网络)时按 KLLM_FALLBACK_MODELS 依次换模型;
+- 上游返回非 JSON: 原样透传字节, 不崩溃;
+- 流式中途断开: 补发 SSE error 事件和 [DONE], 账本记为 incomplete。
+额度: 达到 KLLM_DAILY_LIMIT / KLLM_MONTHLY_LIMIT 返回 429; 达到告警比例时加响应头并记日志。
+并发: 同时转发给上游的请求数不超过 KLLM_MAX_CONCURRENCY, 多出的排队。
 每个请求带 X-Request-ID(客户端给了就沿用), 日志记录模型、状态码与耗时。
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import time
@@ -25,15 +31,30 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from ..common.config import AVAILABLE_MODELS, Settings, load_settings
 from ..common.errors import CredentialError
 from ..common.logging import get_logger, request_id_var
-from ..common.retry import RetryPolicy, is_retryable_status
+from ..common.retry import policy_from_settings
 from .credentials import TokenManager
-from .usage import append_record, extract_record
+from .usage import Ledger, extract_record, ledger_from_settings
 
 logger = get_logger(__name__)
 
 # 上游认为 token 无效的状态码, 触发一次续期重试。
 TOKEN_REJECTED_STATUSES = (401, 403)
 REQUEST_ID_HEADER = "X-Request-ID"
+MODEL_HEADER = "X-KLLM-Model"
+BUDGET_HEADER = "X-KLLM-Budget"
+BUDGET_WARNING_HEADER = "X-KLLM-Budget-Warning"
+STREAM_DONE = b"data: [DONE]\n\n"
+
+
+def should_fall_back(status_code: int) -> bool:
+    """首选模型的哪些最终结果值得换备用模型: 限流与服务端错误。"""
+    return status_code == 429 or status_code >= 500
+
+
+def stream_error_event(message: str) -> bytes:
+    """OpenAI 风格的 SSE 错误事件。"""
+    payload = {"error": {"message": message, "type": "upstream_stream_interrupted"}}
+    return b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
 
 Sleeper = Callable[[float], Awaitable[None]]
 
@@ -41,18 +62,17 @@ Sleeper = Callable[[float], Awaitable[None]]
 def create_app(settings: Settings | None = None,
                token_manager: TokenManager | None = None,
                http_client: httpx.AsyncClient | None = None,
-               sleep: Sleeper | None = None) -> FastAPI:
+               sleep: Sleeper | None = None,
+               ledger: Ledger | None = None) -> FastAPI:
     """构造网关应用。参数可注入, 便于测试(sleep 用于跳过真实退避等待)。"""
     settings = settings or load_settings()
     token_manager = token_manager or TokenManager(settings)
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=settings.request_timeout_seconds)
-    policy = RetryPolicy(
-        max_retries=settings.max_retries,
-        base_delay=settings.retry_base_delay,
-        max_delay=settings.retry_max_delay,
-    )
+    policy = policy_from_settings(settings)
     sleeper: Sleeper = sleep or anyio.sleep
+    ledger = ledger or ledger_from_settings(settings)
+    limiter = asyncio.Semaphore(settings.max_concurrency)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -65,6 +85,7 @@ def create_app(settings: Settings | None = None,
     app.state.settings = settings
     app.state.token_manager = token_manager
     app.state.http_client = client
+    app.state.ledger = ledger
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -128,6 +149,26 @@ def create_app(settings: Settings | None = None,
             ],
         }
 
+    @app.get("/v1/usage")
+    async def usage(authorization: str | None = Header(default=None)) -> dict:
+        """本地估算的今日/本月用量与额度。"""
+        check_local_key(authorization)
+        return {**ledger.status().to_dict(), "timezone": settings.usage_timezone}
+
+    def budget_headers(status) -> dict[str, str]:
+        """额度相关响应头(只用 ASCII)。"""
+        headers = {
+            BUDGET_HEADER: (
+                f"today={status.today.cost_dollars:.4f}/{status.daily_limit:.2f};"
+                f"month={status.month.cost_dollars:.4f}/{status.monthly_limit:.2f}"
+            )
+        }
+        if status.warning:
+            headers[BUDGET_WARNING_HEADER] = (
+                f"daily={status.daily_ratio:.0%};monthly={status.monthly_ratio:.0%}"
+            )
+        return headers
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request,
                                authorization: str | None = Header(default=None)):
@@ -141,14 +182,66 @@ def create_app(settings: Settings | None = None,
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
 
+        budget = ledger.status()
+        if budget.exceeded:
+            logger.warning("拒绝请求: %s", budget.exceeded)
+            return JSONResponse(
+                status_code=429,
+                content={"error": {"message": f"kllm 本地额度上限: {budget.exceeded}",
+                                   "type": "budget_exceeded"}},
+                headers=budget_headers(budget),
+            )
+        if budget.warning:
+            logger.warning("额度告警: %s", budget.warning)
+
         model = payload.get("model", "")
         streaming = bool(payload.get("stream"))
         logger.info("chat model=%s stream=%s", model, streaming)
 
-        upstream = await _send_with_retry(payload, streaming)
-        if streaming:
-            return _streaming_response(upstream, model)
-        return await _json_response(upstream, model)
+        await limiter.acquire()
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                limiter.release()
+
+        try:
+            upstream, used_model = await _send_with_fallback(payload, streaming)
+            if streaming:
+                response = _streaming_response(upstream, used_model, release)
+            else:
+                response = await _json_response(upstream, used_model)
+                release()
+        except BaseException:
+            release()
+            raise
+        response.headers.update(budget_headers(budget))
+        response.headers[MODEL_HEADER] = used_model
+        return response
+
+    async def _send_with_fallback(payload: dict, streaming: bool) -> tuple[httpx.Response, str]:
+        """按 [请求的模型] + 备用模型依次尝试, 返回(响应, 实际使用的模型)。"""
+        requested = payload.get("model", "")
+        chain = [requested] + [m for m in settings.fallback_models if m != requested]
+        for index, model in enumerate(chain):
+            is_last = index == len(chain) - 1
+            attempt_payload = payload if model == requested else {**payload, "model": model}
+            try:
+                response = await _send_with_retry(attempt_payload, streaming)
+            except HTTPException as error:
+                if is_last or error.status_code != 502:
+                    raise
+                logger.warning("模型 %s 网络失败, 改用备用模型 %s", model, chain[index + 1])
+                continue
+            if should_fall_back(response.status_code) and not is_last:
+                await response.aclose()
+                logger.warning("模型 %s 返回 HTTP %s, 改用备用模型 %s",
+                               model, response.status_code, chain[index + 1])
+                continue
+            return response, model
+        raise AssertionError("unreachable")
 
     async def _send_with_retry(payload: dict, streaming: bool) -> httpx.Response:
         """发请求并按策略重试; 网络错误耗尽重试后返回 502。"""
@@ -159,7 +252,7 @@ def create_app(settings: Settings | None = None,
             try:
                 response = await _send_once(payload, streaming, active)
             except httpx.TransportError as error:
-                if attempt >= policy.max_retries:
+                if attempt >= policy.max_retries or not policy.should_retry_error(error):
                     logger.error("上游网络错误, 已重试 %d 次: %s", attempt, error)
                     raise HTTPException(
                         status_code=502,
@@ -179,7 +272,7 @@ def create_app(settings: Settings | None = None,
                 token_refreshed = True
                 continue
 
-            if is_retryable_status(response.status_code) and attempt < policy.max_retries:
+            if policy.should_retry_status(response.status_code) and attempt < policy.max_retries:
                 delay = policy.delay(attempt, response.headers.get("retry-after"))
                 await response.aclose()
                 logger.warning("上游 HTTP %s, %.1fs 后重试(%d/%d)",
@@ -221,36 +314,42 @@ def create_app(settings: Settings | None = None,
                 media_type=upstream.headers.get("content-type", "text/plain"),
             )
         if upstream.status_code == 200 and isinstance(parsed, dict):
-            append_record(settings.usage_path, extract_record(model, parsed, streamed=False))
+            ledger.record(extract_record(model, parsed, streamed=False))
         elif upstream.status_code != 200:
             logger.warning("上游返回 HTTP %s: %s", upstream.status_code, body[:300])
         return JSONResponse(content=parsed, status_code=upstream.status_code)
 
-    def _streaming_response(upstream: httpx.Response, model: str) -> StreamingResponse:
+    def _streaming_response(upstream: httpx.Response, model: str,
+                            release: Callable[[], None]) -> StreamingResponse:
         """流式: 字节级透传 SSE, 不解析重组, 保证 tool_calls 分片不失真。
 
         转发的字节一个不改; 只旁路复制一份用来抽取用量 —— 上游每个 chunk 都带
-        累计 usage, 取最后一个见到的即可。
+        累计 usage, 取最后一个见到的即可。上游中途断开时补发 error 事件和 [DONE],
+        让客户端明确知道回答不完整。
         """
 
         async def iterate():
             tail = b""
             last_usage: dict = {}
+            incomplete = False
             try:
                 async for chunk in upstream.aiter_bytes():
                     yield chunk
                     if upstream.status_code == 200:
                         tail, last_usage = _scan_usage(tail + chunk, last_usage)
             except httpx.TransportError as error:
-                # 响应头已经发出, 只能记录并结束流。
-                logger.error("流式转发中断: %s", error)
+                # 响应头已经发出, 只能在流里告诉客户端出错了。
+                incomplete = True
+                logger.error("流式转发中断: %s: %s", type(error).__name__, error)
+                yield stream_error_event(f"上游流式响应中断({type(error).__name__}), 回答不完整")
+                yield STREAM_DONE
             finally:
                 await upstream.aclose()
+                release()
                 if upstream.status_code == 200:
-                    append_record(
-                        settings.usage_path,
-                        extract_record(model, {"usage": last_usage}, streamed=True),
-                    )
+                    ledger.record(extract_record(
+                        model, {"usage": last_usage}, streamed=True, incomplete=incomplete,
+                    ))
 
         media_type = upstream.headers.get("content-type", "text/event-stream")
         return StreamingResponse(
