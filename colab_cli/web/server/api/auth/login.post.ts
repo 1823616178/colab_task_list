@@ -26,7 +26,7 @@ export default defineEventHandler(async (event) => {
   const verdict = limiter.check(ip, username)
   if (!verdict.allowed) {
     const retryAfter = Math.ceil(verdict.retryAfterMs / 1000)
-    setResponseHeader(event, 'Retry-After', String(retryAfter))
+    setResponseHeader(event, 'Retry-After', retryAfter)
     await writeAudit(event, {
       action: 'auth.login.failure',
       target: username,

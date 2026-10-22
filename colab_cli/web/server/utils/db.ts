@@ -22,6 +22,7 @@ import { CreateAuditLog1725000000008 } from '../migrations/008_CreateAuditLog'
 import { AddWorkflowEditableFields1725000000009 } from '../migrations/009_AddWorkflowEditableFields'
 import { CreateWorkflowDrafts1725000000010 } from '../migrations/010_CreateWorkflowDrafts'
 import { AddTaskFtpUpload1725000000011 } from '../migrations/011_AddTaskFtpUpload'
+import { AddTaskOutputRetention1725000000012 } from '../migrations/012_AddTaskOutputRetention'
 
 // globalThis 缓存：dev 热更新时不重复建连
 declare global {
@@ -74,6 +75,7 @@ export function getDataSource(): Promise<DataSource> {
           AddWorkflowEditableFields1725000000009,
           CreateWorkflowDrafts1725000000010,
           AddTaskFtpUpload1725000000011,
+          AddTaskOutputRetention1725000000012,
         ],
       })
       await dataSource.initialize()

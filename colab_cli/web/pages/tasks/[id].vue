@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { extractApiError, useAuthStore } from '~/stores/auth'
 import { isTerminalStatus, TASK_STATUS_LABELS, useTaskStore } from '~/stores/task'
-import type { TaskRow } from '~/stores/task'
+import type { TaskRetention, TaskRow } from '~/stores/task'
 import { useTaskStreamStore } from '~/stores/taskStream'
 import { useUiStore } from '~/stores/ui'
 
@@ -18,6 +18,8 @@ const taskId = route.params.id as string
 
 useHead({ title: `任务 ${taskId}` })
 const task = ref<TaskRow | null>(null)
+const retention = ref<TaskRetention | null>(null)
+const keepPending = ref(false)
 const loadError = ref('')
 const actionPending = ref(false)
 const driveConfirmPending = ref(false)
@@ -38,7 +40,9 @@ const connectionLabels: Record<string, string> = {
 
 async function reloadTask() {
   try {
-    task.value = await taskStore.fetchTask(taskId)
+    const detail = await taskStore.fetchTaskDetail(taskId)
+    task.value = detail.task
+    retention.value = detail.retention
     loadError.value = ''
   } catch (err) {
     loadError.value = extractApiError(err, '加载任务失败')
@@ -64,6 +68,27 @@ onMounted(async () => {
 onUnmounted(() => {
   streamStore.close() // doc/04 §3.2：离开必须 close
 })
+
+// 产物保留提示：距离定时清理的剩余天数（<= 3 天时高亮）
+const retentionDaysLeft = computed(() => {
+  if (!retention.value?.expiresAt) return null
+  return Math.ceil((new Date(retention.value.expiresAt).getTime() - Date.now()) / 86_400_000)
+})
+
+async function onToggleKeep() {
+  if (!task.value) return
+  const next = !task.value.keepOutput
+  keepPending.value = true
+  try {
+    await taskStore.setKeepOutput(taskId, next)
+    uiStore.info(next ? '已设为永久保留，定时清理将跳过该任务产物' : '已取消永久保留，恢复按保留期清理')
+    await reloadTask()
+  } catch (err) {
+    uiStore.error(extractApiError(err, '更新保留设置失败'))
+  } finally {
+    keepPending.value = false
+  }
+}
 
 async function onCancel(mode: 'interrupt' | 'destroy') {
   if (mode === 'destroy') {
@@ -257,6 +282,29 @@ async function onDownload(kind: 'output' | 'log') {
         下载 run.log
       </button>
       <p v-else class="container_task_detail_footer_note">任务已结束，无可用动作。</p>
+
+      <div
+        v-if="retention && retention.reason !== 'not_terminal' && retention.reason !== 'disabled'"
+        class="container_task_detail_footer_retention"
+        :data-urgent="retentionDaysLeft !== null && retentionDaysLeft <= 3 ? 'true' : 'false'"
+      >
+        <span v-if="retention.reason === 'keep'">本任务产物已设为永久保留，不会被定时清理。</span>
+        <span v-else-if="retentionDaysLeft !== null && retentionDaysLeft <= 0">产物已超过保留期，将在下一轮定时清理中删除。</span>
+        <span v-else>
+          产物将于 {{ formatLocalTime(retention.expiresAt) }}（约 {{ retentionDaysLeft }} 天后）自动清理。
+          <template v-if="retention.reason === 'unsynced'">尚未下载且未同步到 FTP，已延长保留至 {{ retention.retentionDays }} 天。</template>
+        </span>
+        <button
+          v-if="isOperator"
+          class="container_task_detail_footer_keep"
+          type="button"
+          :disabled="keepPending"
+          :aria-pressed="task.keepOutput"
+          @click="onToggleKeep"
+        >
+          {{ task.keepOutput ? '取消永久保留' : '永久保留产物' }}
+        </button>
+      </div>
     </section>
   </div>
 </template>
@@ -457,6 +505,32 @@ async function onDownload(kind: 'output' | 'log') {
   color: var(--c-text-invert);
   background: var(--c-danger);
   border: 1px solid var(--c-danger);
+}
+
+.container_task_detail_footer_retention {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text-sub);
+  background: var(--c-surface-sub);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+}
+
+.container_task_detail_footer_retention[data-urgent='true'] {
+  color: var(--c-warn-text);
+  background: var(--c-warn-bg);
+  border-color: var(--c-warn-border);
+}
+
+.container_task_detail_footer_keep {
+  flex: none;
+  font-size: var(--fs-xs);
 }
 
 .container_task_detail_footer_actions {

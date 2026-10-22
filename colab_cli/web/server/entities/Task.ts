@@ -1,8 +1,8 @@
 import { EntitySchema } from 'typeorm'
 
 // doc/03 §3 Task + §4 状态机。id 沿用 create_task_id() 格式（char(24)，非自增）。
-// 「同一 session 只允许一个非终态任务」用 activeSessionKey 生成列 + 唯一索引实现
-// （MySQL 无部分唯一约束）：非终态（queued/running）时取 sessionName，否则 NULL。
+// activeSessionKey 生成列：非终态（queued/running）时取 sessionName，否则 NULL。
+// 012 起改为普通索引：同会话可有多个 queued（Runner FIFO 排队），互斥由 Runner 保证。
 export type TaskStatus =
   | 'queued'
   | 'running'
@@ -57,6 +57,10 @@ export interface Task {
   ftpUploadedAt: Date | null
   ftpError: string | null
   ftpAttempts: number
+  /** 永久保留产物（定时清理跳过） */
+  keepOutput: boolean
+  /** 首次从控制台下载产物 ZIP 的时间 */
+  outputDownloadedAt: Date | null
   /** colab_output/<id>/run.log */
   logPath: string | null
   /** 失败保护是否触发 */
@@ -119,6 +123,8 @@ export const TaskSchema = new EntitySchema<Task>({
     ftpUploadedAt: { type: 'datetime', nullable: true },
     ftpError: { type: 'text', nullable: true },
     ftpAttempts: { type: 'int', default: 0 },
+    keepOutput: { type: 'boolean', default: false },
+    outputDownloadedAt: { type: 'datetime', nullable: true },
     logPath: { type: 'varchar', length: 512, nullable: true },
     sessionKept: { type: 'boolean', default: false },
     transportMode: { type: 'enum', enum: ['native', 'cli', 'dry_run'], nullable: true },
@@ -138,5 +144,6 @@ export const TaskSchema = new EntitySchema<Task>({
     { name: 'IDX_tasks_session_status', columns: ['sessionName', 'status'] },
     { name: 'IDX_tasks_workflow_config', columns: ['workflowConfigId'] },
     { name: 'IDX_tasks_ftp_status', columns: ['ftpStatus', 'finishedAt'] },
+    { name: 'IDX_tasks_active_session', columns: ['activeSessionKey'] },
   ],
 })

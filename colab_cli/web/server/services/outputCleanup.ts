@@ -11,6 +11,8 @@ import type { TaskStatus } from '../entities/Task'
 import { getDataSource } from '../utils/db'
 import { writeAudit } from '../utils/audit'
 import { repoRoot } from './workflows'
+import { retentionFor } from './outputRetention'
+import type { RetentionOptions } from './outputRetention'
 
 export function runnerOutputDir(): string {
   const config = useRuntimeConfig()
@@ -25,6 +27,8 @@ export interface CleanupResult {
   retentionDays: number
   /** 命中的终态超期任务数 */
   candidates: number
+  /** 因 keepOutput / 未同步延长保留而跳过的任务 */
+  skipped: { taskId: string, reason: 'keep' | 'unsynced' }[]
   /** 实际删除的 task_id 列表 */
   deleted: string[]
   /** 释放的字节数（尽力统计） */
@@ -47,15 +51,32 @@ async function dirSizeBytes(dir: string): Promise<number> {
   return total
 }
 
-export async function cleanupTerminalTaskOutputs(retentionDays: number): Promise<CleanupResult> {
-  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)
+export async function cleanupTerminalTaskOutputs(
+  options: RetentionOptions | number,
+): Promise<CleanupResult> {
+  const retention: RetentionOptions = typeof options === 'number'
+    ? { retentionDays: options, unsyncedRetentionDays: options }
+    : options
+  const retentionDays = retention.retentionDays
+  const now = new Date()
+  // DB 粗筛用标准保留期；延长保留 / keepOutput 在下面逐条判定
+  const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000)
   const ds = await getDataSource()
   const tasks = await ds.getRepository(TaskSchema).find({
     where: {
       status: In(TERMINAL_TASK_STATUSES),
       finishedAt: LessThan(cutoff),
     },
-    select: { id: true, status: true, finishedAt: true },
+    select: {
+      id: true,
+      status: true,
+      finishedAt: true,
+      keepOutput: true,
+      ftpStatus: true,
+      outputZipPath: true,
+      outputDownloadedAt: true,
+      transportMode: true,
+    },
   })
 
   const root = runnerOutputDir()
@@ -63,11 +84,19 @@ export async function cleanupTerminalTaskOutputs(retentionDays: number): Promise
     cutoff,
     retentionDays,
     candidates: tasks.length,
+    skipped: [],
     deleted: [],
     freedBytes: 0,
     errors: [],
   }
   for (const task of tasks) {
+    const info = retentionFor(task, retention)
+    if (info.reason === 'keep' || info.reason === 'unsynced') {
+      if (!info.expiresAt || info.expiresAt > now) {
+        result.skipped.push({ taskId: task.id, reason: info.reason })
+        continue
+      }
+    }
     // 双保险：task_id 必须是约定格式，且解析后的父目录必须就是输出根
     // （防 DB 行被污染时删到输出根之外的目录）
     const dir = path.resolve(root, task.id)
@@ -92,7 +121,8 @@ export async function cleanupTerminalTaskOutputs(retentionDays: number): Promise
           sizeBytes,
           status: task.status as TaskStatus,
           finishedAt: task.finishedAt,
-          retentionDays,
+          retentionDays: info.retentionDays,
+          reason: info.reason,
         },
         user: { userId: null, username: 'system' },
       })

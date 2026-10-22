@@ -34,6 +34,8 @@ export default defineNuxtConfig({
     runnerOutputDir: '',
     // P5：终态任务产物保留天数（每日定时清理 <runnerOutputDir>/<task_id>，doc/05 P5）
     outputRetentionDays: 14,
+    // 成功产物「既未下载、FTP 也未镜像成功」时的延长保留期（天）；缺省 = 4 × 标准保留期
+    outputUnsyncedRetentionDays: 0,
     // 成功产物异步镜像到 FTP。全部为服务端私有配置，绝不暴露到 runtimeConfig.public。
     ftpHost: '',
     ftpPort: 21,

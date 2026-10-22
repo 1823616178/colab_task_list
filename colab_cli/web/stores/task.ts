@@ -43,6 +43,8 @@ export interface TaskRow {
   ftpUploadedAt: string | null
   ftpError: string | null
   ftpAttempts: number
+  keepOutput: boolean
+  outputDownloadedAt: string | null
   logPath: string | null
   sessionKept: boolean
   transportMode: 'native' | 'cli' | 'dry_run' | null
@@ -67,6 +69,13 @@ export interface SubmitTaskPayload {
   timeout: number
   /** Runner 演练通道（不烧计算单元），仅调试 */
   dry_run?: boolean
+}
+
+/** GET /api/tasks/:id 附带的产物保留信息（server/services/outputRetention.ts） */
+export interface TaskRetention {
+  reason: 'not_terminal' | 'keep' | 'unsynced' | 'standard' | 'disabled'
+  expiresAt: string | null
+  retentionDays: number | null
 }
 
 export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
@@ -151,9 +160,18 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   async function fetchTask(id: string): Promise<TaskRow> {
+    return (await fetchTaskDetail(id)).task
+  }
+
+  async function fetchTaskDetail(id: string): Promise<{ task: TaskRow, retention: TaskRetention | null }> {
     const { $apiFetch } = useNuxtApp()
-    const res = await $apiFetch<{ task: TaskRow }>(`/api/tasks/${id}`)
-    return res.task
+    const res = await $apiFetch<{ task: TaskRow, retention?: TaskRetention }>(`/api/tasks/${id}`)
+    return { task: res.task, retention: res.retention ?? null }
+  }
+
+  async function setKeepOutput(id: string, keep: boolean): Promise<void> {
+    const { $apiFetch } = useNuxtApp()
+    await $apiFetch(`/api/tasks/${id}/keep`, { method: 'PATCH', body: { keep } })
   }
 
   return {
@@ -171,5 +189,7 @@ export const useTaskStore = defineStore('task', () => {
     redownloadTask,
     confirmDrive,
     fetchTask,
+    fetchTaskDetail,
+    setKeepOutput,
   }
 })

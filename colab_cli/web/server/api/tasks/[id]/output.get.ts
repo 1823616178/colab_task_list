@@ -5,6 +5,8 @@ import { getRouterParam, sendStream, setResponseHeaders } from 'h3'
 import { findTask } from '../../../services/taskEvents'
 import { resolveTaskFilePath, taskOutputRoot } from '../../../services/taskFiles'
 import { sendApiError } from '../../../utils/errors'
+import { getDataSource } from '../../../utils/db'
+import { TaskSchema } from '../../../entities/Task'
 
 export default defineEventHandler(async (event) => {
   const id = getRouterParam(event, 'id')!
@@ -20,6 +22,12 @@ export default defineEventHandler(async (event) => {
   const stat = await fs.stat(zipPath).catch(() => null)
   if (!stat?.isFile()) {
     return sendApiError(event, 404, 'OUTPUT_FILE_MISSING', `输出文件已不存在: ${zipPath}`)
+  }
+  if (!task.outputDownloadedAt) {
+    // 记首次下载：产物已有用户侧副本，清理策略回落到标准保留期
+    await (await getDataSource()).getRepository(TaskSchema)
+      .update({ id }, { outputDownloadedAt: new Date() })
+      .catch(error => console.warn(`[output] ${id} 记录下载时间失败:`, error))
   }
   setResponseHeaders(event, {
     'Content-Type': 'application/zip',
