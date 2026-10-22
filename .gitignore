@@ -80,3 +80,6 @@ Thumbs.db
 
 # Kaggle Benchmarks push/run 生成的任务记录
 *.task.json
+!.env.example
+!**/.env.example
+!**/.env.docker.example
