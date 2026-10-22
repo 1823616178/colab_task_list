@@ -1,13 +1,21 @@
-# kaggle-code
+# colab_task_list
 
-Kaggle 使用示例项目：CLI、kagglehub、Kernels(云端 Notebook)、Benchmarks(托管 LLM 调用)。
+云端算力与 Kaggle AI 额度的工具集合，分三块：
+
+| 目录 | 内容 |
+|---|---|
+| [`colab_cli/`](colab_cli/README.md) | Google Colab 云端算力自动化（ComfyUI / MiniMax H3），含 runner 与 Web UI |
+| [`kaggle_tools/`](kaggle_tools/README.md) | **可安装的 Python 包**：`kllm`（Kaggle AI 额度 → 本地 OpenAI 兼容网关）、`kcloud`（云端代码生成评测） |
+| `demo/` | Kaggle CLI / kagglehub / Kernels / Benchmarks 入门示例 |
+
+下面是 `demo/` 的使用说明。
 
 详细操作手册见 [操作手册.md](操作手册.md)。
 
 ## 环境准备
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt     # demo 依赖; kaggle_tools 有自己的 pyproject.toml
 ```
 
 认证：把 `kaggle.json` 或 `access_token` 放到 `~/.kaggle/`(权限 600)。
@@ -17,6 +25,7 @@ pip install -r requirements.txt
 
 ```
 colab_cli/                 # Google Colab CLI 云端算力自动化 (ComfyUI / MiniMax H3)
+kaggle_tools/              # kllm 网关 + kcloud 云端评测 (pip install -e kaggle_tools)
 demo/
 ├── kagglehub_tutorial/   # kagglehub 库示例 01~07(下载数据集/模型/竞赛数据等)
 ├── my_kernel/            # 推送脚本到云端 Notebook 的完整示例

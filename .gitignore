@@ -77,3 +77,6 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# Kaggle Benchmarks push/run 生成的任务记录
+*.task.json

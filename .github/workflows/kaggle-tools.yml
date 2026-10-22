@@ -1,0 +1,32 @@
+name: kaggle-tools
+
+on:
+  push:
+    paths: ["kaggle_tools/**", ".github/workflows/kaggle-tools.yml"]
+  pull_request:
+    paths: ["kaggle_tools/**", ".github/workflows/kaggle-tools.yml"]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: kaggle_tools
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install (locked)
+        run: uv sync --locked --extra dev
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Pytest
+        run: uv run pytest
+        env:
+          PYTHONUTF8: "1"
