@@ -1,0 +1,14 @@
+# 运行产物与构建出的单文件任务
+/runs/
+/build/
+/dist/
+# kaggle b t push / run 在当前目录生成的记录
+*.task.json
+*.run.json
+# 直接执行 task 文件时落下的产物
+/_acceptance/
+/generated/
+/workspace/
+/changes.diff
+/verification.txt
+.env
