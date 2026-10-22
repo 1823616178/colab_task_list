@@ -11,6 +11,7 @@
 // P4 会话对账（services/sessionReconcile.ts）发现 VM 已消失时经
 // stopTaskSubscription() 结束订阅 —— 同样是生命周期驱动（任务已不可能再推进）。
 import { TaskSchema } from '../entities/Task'
+import { notifyTaskFinished } from './taskNotify'
 import { getDataSource } from '../utils/db'
 import { runnerStream } from './runnerClient'
 import {
@@ -207,6 +208,7 @@ function handleEventFrame(sub: Subscription, rawFrame: string, data: string): vo
             )
           }
         }
+        void notifyTaskFinished(event.task_id)
         broadcast(sub, rawFrame)
         sub.terminal = true
         sub.controller?.abort() // 终态后主动断开（Runner 也会关流）
@@ -224,6 +226,7 @@ async function markOrphaned(taskId: string): Promise<void> {
       { id: taskId },
       { status: 'orphaned', finishedAt: new Date(), errorCode: 'RUNNER_LOST', errorMessage: 'Runner 侧已无该任务记录' },
     )
+    void notifyTaskFinished(taskId)
   } catch (error) {
     console.error(`[task-sub] ${taskId} 标记 orphaned 失败:`, error)
   }

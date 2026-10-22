@@ -23,6 +23,14 @@ const route = useRoute()
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
 const healthStore = useHealthStore()
+const taskNotifyStore = useTaskNotifyStore()
+
+async function onToggleNotify() {
+  const permission = await taskNotifyStore.toggle()
+  if (permission === 'unsupported') uiStore.warn('当前浏览器不支持桌面通知')
+  else if (permission === 'denied') uiStore.warn('浏览器已拒绝通知权限，请在地址栏的网站设置中允许通知')
+  else uiStore.info(taskNotifyStore.enabled ? '已开启任务完成桌面通知' : '已关闭任务完成桌面通知')
+}
 
 const showNav = computed(() => route.path !== '/login' && authStore.isLoggedIn)
 const isOperator = computed(() =>
@@ -36,20 +44,25 @@ onMounted(() => {
     sessionStore.startPolling()
     healthStore.startPolling()
   }
+  taskNotifyStore.init()
+  if (authStore.isLoggedIn) taskNotifyStore.start()
 })
 watch(() => authStore.isLoggedIn, (loggedIn) => {
   if (!import.meta.client) return
   if (loggedIn) {
     sessionStore.startPolling()
     healthStore.startPolling()
+    taskNotifyStore.start()
   } else {
     sessionStore.stopPolling()
     healthStore.stopPolling()
+    taskNotifyStore.stop()
   }
 })
 onBeforeUnmount(() => {
   sessionStore.stopPolling()
   healthStore.stopPolling()
+  taskNotifyStore.stop()
 })
 
 const navItems = computed(() => {
@@ -101,6 +114,16 @@ const navItems = computed(() => {
         >
           <span class="container_dash_list_header_dot" aria-hidden="true" />
           <span class="container_dash_list_header_state">系统{{ healthStore.label }}</span>
+        </button>
+        <button
+          class="container_dash_list_header_notify"
+          type="button"
+          :aria-pressed="taskNotifyStore.enabled"
+          :title="taskNotifyStore.enabled ? '任务完成桌面通知：已开启（点击关闭）' : '任务完成桌面通知：已关闭（点击开启）'"
+          :aria-label="taskNotifyStore.enabled ? '关闭任务完成桌面通知' : '开启任务完成桌面通知'"
+          @click="onToggleNotify"
+        >
+          <span aria-hidden="true">{{ taskNotifyStore.enabled ? '🔔' : '🔕' }}</span>
         </button>
         <button
           class="container_dash_list_header_theme"
@@ -348,6 +371,16 @@ const navItems = computed(() => {
 
 .container_dash_list_header_status[data-health='unknown'] .container_dash_list_header_state {
   color: var(--c-text-weak);
+}
+
+.container_dash_list_header_notify {
+  padding: 4px 8px;
+  font-size: var(--fs-xs);
+}
+
+.container_dash_list_header_notify[aria-pressed='true'] {
+  border-color: var(--c-brand-border);
+  background: var(--c-brand-bg);
 }
 
 .container_dash_list_header_theme {

@@ -43,6 +43,12 @@ export default defineNuxtConfig({
     ftpPassword: '',
     ftpDirectory: 'colab',
     ftpSecure: false,
+    // 任务终态通知 Webhook（钉钉/飞书/企业微信/通用 JSON），全部服务端私有
+    notifyWebhookUrl: '',
+    notifyWebhookKind: '',
+    notifyWebhookSecret: '',
+    notifyOn: '',
+    notifyConsoleUrl: '',
   },
   typescript: { strict: true },
 })
