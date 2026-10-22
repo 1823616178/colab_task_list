@@ -13,10 +13,9 @@ import sys
 from pathlib import Path
 
 import kaggle_benchmarks as kbench
+from _workspace_tools import *  # kcloud build 时内联
 from kaggle_benchmarks.tools.base import ToolInvocationLimitExhausted
 from kaggle_benchmarks.tools.native import native_tool_agent
-
-from _workspace_tools import *  # kcloud build 时内联
 
 # ==== 配置区 ================================================================
 

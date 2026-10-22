@@ -278,7 +278,7 @@ def command_dataset(args: argparse.Namespace) -> int:
 def command_push(args: argparse.Namespace) -> int:
     """把任务推到 Kaggle。注意: 不可删除, 不可撤销。"""
     slug, task_file = built_task(args)
-    print(f"⚠ push 会在 Kaggle 上创建永久记录(源码 + backing notebook), 服务端不支持删除。")
+    print("⚠ push 会在 Kaggle 上创建永久记录(源码 + backing notebook), 服务端不支持删除。")
     print(f"  任务: {slug}   文件: {task_file.name}")
     if args.dataset:
         print(f"  挂载数据集: {', '.join(args.dataset)}")
