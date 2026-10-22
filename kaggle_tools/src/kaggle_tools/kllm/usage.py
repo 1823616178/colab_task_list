@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import DAILY_BUDGET_DOLLARS, MONTHLY_BUDGET_DOLLARS
+from ..common.config import DAILY_BUDGET_DOLLARS, MONTHLY_BUDGET_DOLLARS
+from ..common.logging import get_logger
+
+logger = get_logger(__name__)
 
 NANODOLLARS_PER_DOLLAR = 1_000_000_000
 
@@ -46,10 +49,10 @@ def append_record(usage_path: Path, record: dict) -> None:
     """把一条记录追加进账本, 失败不影响主流程。"""
     try:
         usage_path.parent.mkdir(parents=True, exist_ok=True)
-        with usage_path.open("a") as handle:
+        with usage_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
-    except OSError:
-        pass
+    except OSError as error:
+        logger.warning("写用量账本 %s 失败: %s", usage_path, error)
 
 
 def load_records(usage_path: Path) -> list[dict]:
@@ -57,7 +60,7 @@ def load_records(usage_path: Path) -> list[dict]:
     if not usage_path.exists():
         return []
     records = []
-    for line in usage_path.read_text().splitlines():
+    for line in usage_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:

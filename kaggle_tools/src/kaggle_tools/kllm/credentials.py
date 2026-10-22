@@ -5,21 +5,21 @@ Kaggle 下发的代理 token 有效期只有 1 小时, 所有请求都要先过�
 
 import json
 import os
-import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import OPENAI_PATH_SUFFIX, Settings
+from ..common.config import OPENAI_PATH_SUFFIX, Settings
+from ..common.errors import CredentialError, KaggleToolsError
+from ..common.kaggle_cli import run_kaggle
+from ..common.logging import get_logger
+
+logger = get_logger(__name__)
 
 # 提前多少秒判定为过期, 留出请求本身的耗时余量。
 EXPIRY_SKEW_SECONDS = 300
-
-
-class CredentialError(RuntimeError):
-    """凭据获取失败, 消息面向使用者。"""
 
 
 @dataclass(frozen=True)
@@ -87,19 +87,21 @@ def fetch_from_kaggle_cli() -> dict[str, str]:
     with tempfile.TemporaryDirectory() as directory:
         env_file = Path(directory) / ".env"
         env_file.touch()
-        completed = subprocess.run(
-            ["kaggle", "benchmarks", "auth", "--no-confirm", "--env-file", str(env_file)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        try:
+            completed = run_kaggle(
+                ["benchmarks", "auth", "--no-confirm", "--env-file", str(env_file)],
+                capture=True,
+                timeout=120,
+            )
+        except KaggleToolsError as error:
+            raise CredentialError(str(error)) from error
         if completed.returncode != 0:
             raise CredentialError(
                 f"kaggle benchmarks auth 失败(exit {completed.returncode}): "
                 f"{completed.stderr.strip() or completed.stdout.strip()}"
             )
         values: dict[str, str] = {}
-        for line in env_file.read_text().splitlines():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.strip().startswith("#"):
                 key, _, value = line.partition("=")
                 values[key.strip()] = value.strip().strip("'\"")
@@ -144,6 +146,8 @@ class TokenManager:
             try:
                 values = source()
             except Exception as error:  # noqa: BLE001 - 任何失败都要能回落
+                logger.warning("凭据来源 %s 失败: %s: %s", source.__name__,
+                               type(error).__name__, error)
                 errors.append(f"{source.__name__}: {type(error).__name__}: {error}")
                 continue
             base_url = values.get("MODEL_PROXY_URL")
@@ -151,6 +155,7 @@ class TokenManager:
             if not base_url or not token:
                 errors.append(f"{source.__name__}: 返回内容缺少 URL 或 token")
                 continue
+            logger.info("已通过 %s 获取新凭据", source.__name__)
             return ProxyCredentials(
                 base_url=base_url.rstrip("/") + OPENAI_PATH_SUFFIX,
                 token=token,
@@ -167,15 +172,29 @@ class TokenManager:
         if not path.exists():
             return None
         try:
-            return ProxyCredentials.from_dict(json.loads(path.read_text()))
-        except (OSError, ValueError, KeyError):
+            return ProxyCredentials.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, KeyError) as error:
+            logger.warning("凭据缓存 %s 不可用, 将重新获取: %s", path, error)
             return None
 
     def _save_to_disk(self, credentials: ProxyCredentials) -> None:
-        """把凭据写入缓存文件, 权限 600。"""
+        """把凭据写入缓存文件; POSIX 上权限 600, 失败只告警不影响主流程。"""
         path = self._settings.credentials_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = path.with_suffix(".json.tmp")
-        temporary_path.write_text(json.dumps(credentials.to_dict()))
-        os.chmod(temporary_path, 0o600)
-        temporary_path.replace(path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = path.with_suffix(".json.tmp")
+            temporary_path.write_text(json.dumps(credentials.to_dict()), encoding="utf-8")
+            restrict_permissions(temporary_path)
+            temporary_path.replace(path)
+        except OSError as error:
+            logger.warning("写凭据缓存 %s 失败(不影响本次使用): %s", path, error)
+
+
+def restrict_permissions(path: Path) -> None:
+    """把文件权限收紧到仅本人可读写。
+
+    Windows 上 os.chmod 只能切换只读位, 设 0o600 没有意义; 用户目录本身已按账户隔离。
+    """
+    if os.name == "nt":
+        return
+    os.chmod(path, 0o600)
