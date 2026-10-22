@@ -15,6 +15,10 @@ export default defineNuxtConfig({
     dbUser: process.env.NUXT_DB_USER || '',
     dbPassword: process.env.NUXT_DB_PASSWORD || '',
     dbName: process.env.NUXT_DB_NAME || 'colab_task',
+    // 可通过 NUXT_DB_SYNCHRONIZE / NUXT_DB_MIGRATIONS_RUN 在运行时覆盖。
+    dbSynchronize: false,
+    dbMigrationsRun: true,
+    dbLogging: false,
     jwtSecret: process.env.NUXT_JWT_SECRET || '',
     // 007_seed_admin_user 迁移使用的初始管理员账号（仅首次建库时生效）。
     // 缺省留空：未配置时迁移会跳过 seed 而不是种出一个人尽皆知的口令。

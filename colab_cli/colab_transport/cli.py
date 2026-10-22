@@ -130,15 +130,26 @@ class ColabCli:
         return command
 
     def run(self, *args, check=True, echo=None) -> subprocess.CompletedProcess:
-        """运行命令并回显；check 时非零退出抛 TransportError（旧 sys.exit 文案）。"""
+        """转发子进程输出到任务日志；失败时保留输出尾部供页面显示。"""
         command = self.build(*args)
         self._log(echo if echo is not None else "+ " + " ".join(command))
-        result = subprocess.run(command)
-        if check and result.returncode != 0:
-            raise TransportError(
-                f"colab {args[0]} 失败 (exit {result.returncode})"
-            )
-        return result
+        returncode, output_tail = self.run_streaming(
+            command, lambda line: self._log(line.rstrip("\r\n")),
+        )
+        if check and returncode != 0:
+            message = f"colab {args[0]} 失败 (exit {returncode})"
+            details = output_tail.strip()[-2000:]
+            if details:
+                message += f"\n{details}"
+            if "No module named 'termios'" in output_tail:
+                message += (
+                    "\n当前 google-colab-cli 导入了 Unix 专用的 termios 模块，"
+                    "无法在原生 Windows 运行；请在 WSL/Linux 或 Linux Docker 容器中运行 Runner。"
+                )
+            raise TransportError(message)
+        return subprocess.CompletedProcess(
+            command, returncode, stdout=output_tail,
+        )
 
     def run_capture(self, *args, echo=None) -> subprocess.CompletedProcess:
         """运行命令并捕获输出（stdout/stderr 不合并）。"""
@@ -158,9 +169,10 @@ class ColabCli:
         )
         output_tail = ""
         if process.stdout is not None:
-            for output_line in process.stdout:
-                on_line(output_line)
-                output_tail = (output_tail + output_line)[-COLAB_OUTPUT_TAIL_CHARS:]
+            with process.stdout:
+                for output_line in process.stdout:
+                    on_line(output_line)
+                    output_tail = (output_tail + output_line)[-COLAB_OUTPUT_TAIL_CHARS:]
         return process.wait(), output_tail
 
     def run_interactive_streaming(

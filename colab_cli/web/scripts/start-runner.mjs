@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// 用 Node 拉起 Python Runner（python3 -m colab_runner）。
+// 用 Node 拉起 Python Runner（Windows 默认 python，其他平台默认 python3）。
 // token / 输出目录与 web/.env 对齐：NUXT_RUNNER_TOKEN → COLAB_RUNNER_TOKEN。
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -34,11 +34,16 @@ if (!token) {
 }
 
 const repoRoot = resolve(process.env.NUXT_REPO_ROOT || resolve(webRoot, '..'))
+if (!existsSync(repoRoot) || !statSync(repoRoot).isDirectory()
+  || !existsSync(resolve(repoRoot, 'colab_runner', '__main__.py'))) {
+  console.error(`错误: NUXT_REPO_ROOT=${repoRoot} 不是有效的 colab_cli 目录（应包含 colab_runner/__main__.py）。请修改 web/.env，或删除 NUXT_REPO_ROOT 使用默认目录。`)
+  process.exit(1)
+}
 const outputDir = process.env.NUXT_RUNNER_OUTPUT_DIR
   || process.env.COLAB_OUTPUT_DIR
   || resolve(repoRoot, 'colab_output')
 const port = process.env.COLAB_RUNNER_PORT || '8765'
-const python = process.env.COLAB_PYTHON || 'python3'
+const python = process.env.COLAB_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
 
 const child = spawn(python, ['-m', 'colab_runner'], {
   cwd: repoRoot,
@@ -65,7 +70,10 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
 }
 
 child.on('error', (error) => {
-  console.error('无法启动 python3 -m colab_runner:', error.message)
+  console.error(`无法启动 ${python} -m colab_runner:`, error.message)
+  if (error.code === 'ENOENT') {
+    console.error('请确认 Python 解释器可用；可先激活 Conda 环境，或设置 COLAB_PYTHON 为 python.exe 的完整路径。')
+  }
   process.exit(1)
 })
 child.on('exit', (code, signal) => {

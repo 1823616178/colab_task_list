@@ -14,6 +14,17 @@ npm run build          # 生产构建（.output/）
 npm start              # 生产运行（0.0.0.0:54471）
 ```
 
+Python Runner 在另一个终端运行 `npm run runner`，自动读取 `web/.env` 的
+`NUXT_RUNNER_TOKEN` 与输出目录配置，默认监听 `127.0.0.1:8765`。
+首次运行先执行 `python -m pip install -r ../requirements.txt`（Linux / macOS 用 `python3`）。
+启动脚本在 Windows 默认使用当前 PATH 中的 `python`（可先激活 Conda 环境），
+Linux / macOS 默认使用 `python3`；也可以用环境变量 `COLAB_PYTHON` 指定解释器路径。
+
+当前锁定的 `google-colab-cli==0.6.0` 在原生 Windows 启动命令时会导入 Unix 专用的
+`termios`，报 `ModuleNotFoundError: No module named 'termios'`。
+Runner HTTP 服务能够启动，但 Colab 任务仍需在 WSL/Linux 或 Linux Docker 容器中运行；
+Docker 部署方式见[上级 README](../README.md#docker-一键启动web--runner--mysql)。
+
 **监听地址 `0.0.0.0:54471`**（局域网可访问，不只是本机）。三个入口各读各的：
 
 | 入口 | 来源 |
@@ -38,8 +49,10 @@ Nitro 入口本身不会读取 `.env`；项目的 `npm start` 使用 Node
 （`127.0.0.1:8765`）**保持只绑本机不变** —— 它凭 ADC 就能建 A100 VM，
 绝不能上网络（doc/01 §7）。
 
-Nitro 启动时自动连接 MySQL 并执行 migration（`migrationsRun: true`，
-含 001 建表与 007 admin seed），无需手工迁移命令。
+Nitro 启动时自动连接 MySQL，默认执行 migration（含 001 建表与 007 admin seed），
+无需手工迁移命令。可在 `.env` 设置 `NUXT_DB_SYNCHRONIZE=false` 与
+`NUXT_DB_MIGRATIONS_RUN=true` 控制实体自动同步和启动迁移，修改后重启 Web 生效。
+生产保持上述默认值；实体自动同步可能修改或删除已有表结构。
 
 ## 环境变量
 
@@ -58,6 +71,9 @@ Nitro 启动时自动连接 MySQL 并执行 migration（`migrationsRun: true`，
 | 变量 | 说明 |
 | :--- | :--- |
 | `NUXT_DB_HOST` / `NUXT_DB_PORT` / `NUXT_DB_USER` / `NUXT_DB_PASSWORD` / `NUXT_DB_NAME` | MySQL 连接。⚠️ 纯数字密码会被 nuxt 自动转型，服务端已 `String()` 兜底 |
+| `NUXT_DB_SYNCHRONIZE` | 根据实体自动同步表结构，默认 `false`，生产保持关闭 |
+| `NUXT_DB_MIGRATIONS_RUN` | 启动时执行尚未执行的迁移，默认 `true` |
+| `NUXT_DB_LOGGING` | 输出 TypeORM 数据库日志，默认 `false`；修改后重启 Web 生效 |
 | `NUXT_JWT_SECRET` | JWT HS256 密钥，`openssl rand -hex 32` 生成 |
 | `NUXT_ADMIN_USERNAME` / `NUXT_ADMIN_PASSWORD` | 初始管理员，仅 007 seed 首次建库时生效 |
 | `NUXT_AUTH_COOKIE_SECURE` | refresh Cookie 的 `Secure` 属性。生产 HTTPS 必须 `true`；本地 http 调试置 `false`，否则浏览器/curl 不回传 Cookie |
@@ -81,7 +97,7 @@ migration `007_seed_admin_user` 从 env 读初始账号建 `role=admin` 用户�
   sign/verify API 最简、最成熟；若未来迁 edge/WebCrypto 运行时，再换 `jose`。
 - **TypeORM 实体用 `EntitySchema` 而非装饰器**：esbuild/nitro 对
   `emitDecoratorMetadata` 支持不全，EntitySchema 零装饰器依赖，实体仍是
-  schema 真相（`synchronize: false`，变更一律手写 migration）。
+  schema 真相（默认 `synchronize: false`，生产变更通过 migration）。
 - 请求校验未引入 zod：端点少，手工校验即可（P2 范围内保持依赖最小）。
 
 ## 认证机制（doc/02 §3.1）

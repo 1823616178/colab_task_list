@@ -47,12 +47,13 @@ export function getDataSource(): Promise<DataSource> {
         // NUXT_ 环境变量会被 nuxt 自动转型（纯数字密码会变成 number），mysql2 只接受字符串
         password: String(config.dbPassword),
         database: String(config.dbName),
-        // doc/03 §1 配置约定：生产禁用 synchronize，一律走 migration
-        synchronize: false,
-        migrationsRun: true,
+        // Nuxt 的环境变量覆盖可能是 boolean 或 string，不能直接用 Boolean('false')。
+        // 默认关闭自动同步、开启迁移；生产环境保持此默认配置。
+        synchronize: String(config.dbSynchronize ?? false).trim().toLowerCase() === 'true',
+        migrationsRun: String(config.dbMigrationsRun ?? true).trim().toLowerCase() === 'true',
         charset: 'utf8mb4', // 工作流名/文件名含中文
         timezone: 'Z', // 全库 UTC，与 task_id 的 UTC 时间戳一致
-        logging: false,
+        logging: String(config.dbLogging ?? false).trim().toLowerCase() === 'true',
         entities: [
           UserSchema,
           RefreshTokenSchema,
