@@ -45,7 +45,13 @@ Kaggle 认证：`kaggle auth login`（或把 `access_token` / `kaggle.json` 放�
 | `KLLM_CACHE_DIR` | `~/.cache/kllm` | 凭据缓存与用量账本 |
 | `KLLM_TIMEOUT` | `600` | 上游请求超时（秒） |
 | `KLLM_DEFAULT_MODEL` | `google/gemini-3-flash-preview` | `kllm ask/doctor` 默认模型 |
-| `KLLM_MAX_RETRIES` / `KLLM_RETRY_BASE_DELAY` / `KLLM_RETRY_MAX_DELAY` | `3` / `1.0` / `30` | 429、5xx 和网络错误的重试（指数退避，遵守 `Retry-After`） |
+| `KLLM_MAX_RETRIES` / `KLLM_RETRY_BASE_DELAY` / `KLLM_RETRY_MAX_DELAY` | `3` / `1.0` / `30` | 重试次数与退避（指数退避，遵守 `Retry-After`） |
+| `KLLM_RETRY_STATUSES` | `429,503` | 重试的状态码。500/502 时上游可能已计费，默认不重试 |
+| `KLLM_DAILY_LIMIT` / `KLLM_MONTHLY_LIMIT` | `10` / `100` | 本地额度上限（美元），达到后返回 429；`0` 表示不限制 |
+| `KLLM_BUDGET_WARN_RATIO` | `0.8` | 达到上限这个比例时告警 |
+| `KLLM_TIMEZONE` | `Asia/Shanghai` | "今天/本月"按哪个时区切分 |
+| `KLLM_MAX_CONCURRENCY` | `4` | 同时转发给上游的请求数，多出的排队 |
+| `KLLM_FALLBACK_MODELS` | 空 | 备用模型（逗号分隔），首选模型 429/5xx/网络失败时依次尝试 |
 | `KLLM_LOG_LEVEL` / `KLLM_LOG_FILE` | `INFO` / 空 | 日志级别、可选日志文件 |
 | `KCLOUD_DEFAULT_MODEL` | `anthropic/claude-sonnet-5@default` | kcloud 默认模型 |
 | `KCLOUD_RUNS_DIR` | `./runs` | kcloud 产物目录 |
@@ -56,10 +62,11 @@ Kaggle 认证：`kaggle auth login`（或把 `access_token` / `kaggle.json` 放�
 
 ```bash
 kllm doctor                    # 自检：拿凭据 + 真调一次模型
-kllm serve                     # 启动网关
+kllm serve                     # 启动网关（非本机地址必须设 KLLM_LOCAL_KEY，或显式 --insecure）
 kllm models                    # 可用模型
+kllm models --check            # 逐个真实调用检查可用性（消耗少量额度）
 kllm ask "写个快排" -m anthropic/claude-sonnet-5@default
-kllm usage                     # 本地估算的用量与余额
+kllm usage                     # 本地估算的今日/本月用量与余额（按 KLLM_TIMEZONE 切分）
 ```
 
 客户端配置：Base URL `http://127.0.0.1:8799/v1`，API Key 随便填（设置了 `KLLM_LOCAL_KEY` 就填那个值），模型名用 `kllm models` 里的原样字符串。
@@ -71,7 +78,14 @@ export OPENAI_BASE_URL=http://127.0.0.1:8799/v1 OPENAI_API_KEY=unused           
 $env:OPENAI_BASE_URL="http://127.0.0.1:8799/v1"; $env:OPENAI_API_KEY="unused"     # PowerShell
 ```
 
-网关行为：token 失效（401/403）时续期后重试一次；429/5xx/网络错误按退避重试，最终网络失败返回 502；每个响应带 `X-Request-ID`，日志记录模型、状态码和耗时。不支持 Claude Code（它要 Anthropic 协议）。
+网关行为：
+
+- **额度**：达到 `KLLM_DAILY_LIMIT` / `KLLM_MONTHLY_LIMIT` 后返回 429（`type: budget_exceeded`）；达到 80% 时记告警日志，并加 `X-KLLM-Budget-Warning` 响应头。每个响应都带 `X-KLLM-Budget`。`GET /v1/usage` 返回今日/本月用量。
+- **重试**：token 失效（401/403）时续期后重试一次；429/503 和连接失败按退避重试；500/502 和读超时默认不重试（避免重复扣费）；网络失败最终返回 502。
+- **备用模型**：设置了 `KLLM_FALLBACK_MODELS` 时，首选模型失败会依次换备用模型，实际使用的模型见 `X-KLLM-Model`。
+- **流式**：上游中途断开时补发一个 SSE `error` 事件和 `data: [DONE]`，账本记为 `incomplete`。
+- **并发**：同时最多 `KLLM_MAX_CONCURRENCY` 个上游请求。
+- 每个响应带 `X-Request-ID`，日志记录模型、状态码和耗时。不支持 Claude Code（它要 Anthropic 协议）。
 
 ## kcloud：云端代码生成
 
@@ -82,12 +96,20 @@ kcloud dataset -r examples/example_repo -y                   #    上传为私�
 kcloud push -d <用户名>/example-repo -y                       # 3. 推任务（⚠ 永久，无法删除）
 kcloud run                                                   # 4. 云端运行
 kcloud status | kcloud log | kcloud download                 # 5. 看结果，下载 changes.diff
+kcloud apply -r <本地仓库>                                    # 6. 应用到本地仓库的新分支
+kcloud cycle -d <用户名>/example-repo -y                       # 3~5 一条龙（已推送过加 --skip-push）
 kcloud build                                                 # 只生成单文件任务到 runs/tasks/
 ```
 
+每次运行产物放在新目录 `runs/local/<时间戳>/` 或 `runs/cloud/<时间戳-模型>/`，不会覆盖上一次。`runs/latest` 和 `runs/<local|cloud>/latest` 指向最近一次（Windows 无符号链接权限时改为 `latest.txt`）。`kcloud local --resume` 接着 `runs/local/latest` 继续改。
+
+`kcloud apply` 默认取 `runs/latest` 里的 `changes.diff`，先 `git apply --check`（失败时什么都不改），再在新分支 `kcloud/<时间戳>` 上应用并提交。要求工作区干净（`--allow-dirty` 跳过）；`--no-commit` 只应用不提交，`-b` 指定分支名，`--diff` 指定文件。
+
+模型在云端改代码时可用的工具：`list_files`、`read_file(path, start_line, end_line)`、`edit_file(path, old_text, new_text)`、`write_file`、`run_verification`。大文件读取时会提示被截断，也不允许整份覆盖，只能用 `edit_file` 局部修改。
+
 `-t repo|spec|codegen` 选择任务（默认 `repo`）。`repo` 任务可以用 `-p` / `--prompt-file` / `--verify` / `--protected` / `--max-rounds` 在运行时覆盖，不用修改任务文件。完整说明见 [docs/cloud_codegen.md](docs/cloud_codegen.md)，Kaggle 原生命令见 [docs/KAGGLE_CLI.md](docs/KAGGLE_CLI.md)。
 
-下载后**先审查 `changes.diff` 再应用**：`git apply --check changes.diff && git apply changes.diff`。
+下载后**先审查 `changes.diff`**，再用 `kcloud apply` 应用。
 
 ## 项目结构
 
@@ -124,6 +146,9 @@ CI（`.github/workflows/kaggle-tools.yml`）在 Linux 和 Windows 上跑 ruff + 
 | `找不到 kaggle 命令` | 激活装了本项目的虚拟环境 |
 | `无法获取 Kaggle 模型代理凭据` | `kaggle config view` 确认登录；账号要开通 Benchmarks |
 | `User location "HK" is not supported` | 地区限制在代理服务端，换出口或联系 Kaggle |
-| 频繁 429 | 已自动退避重试；调大 `KLLM_MAX_RETRIES` 或降低并发 |
+| 频繁 429 | 已自动退避重试；调大 `KLLM_MAX_RETRIES`、降低 `KLLM_MAX_CONCURRENCY`，或配置 `KLLM_FALLBACK_MODELS` |
+| 429 `budget_exceeded` | 达到本地额度上限；`kllm usage` 查看，调整 `KLLM_DAILY_LIMIT` |
+| `拒绝启动: 监听 0.0.0.0 ...` | 设置 `KLLM_LOCAL_KEY`，或确认风险后加 `--insecure` |
+| `kcloud apply` 提示无法干净应用 | 仓库在任务之后有变化；按任务时的版本新建分支再应用，或手动合并 |
 | `kaggle ... 超过 N 秒未结束` | 调大 `KAGGLE_CLI_TIMEOUT` |
 | 配置错误：`XXX 应为整数` | 检查 `.env` / 环境变量中对应项 |

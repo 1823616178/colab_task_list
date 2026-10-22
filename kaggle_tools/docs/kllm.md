@@ -93,7 +93,7 @@ google/gemini-3.1-flash-lite-preview     ibm/granite-4.0-h-small
    已做兜底：调不通就回落到 `kaggle benchmarks auth` 子进程。`pyproject.toml` + `uv.lock` 精确 pin `kaggle==2.2.4`。
 3. **合规**：这笔额度的设计用途是 Benchmarks 任务评测，当成通用编码后端属于超出预期用法，
    可能被限流或收回额度。
-4. **速率限制未知**：撞上 429 时网关按 `Retry-After`/指数退避重试 `KLLM_MAX_RETRIES` 次，仍失败才把状态码返回给客户端。
+4. **速率限制未知**：撞上 429/503 时网关按 `Retry-After`/指数退避重试，仍失败时换 `KLLM_FALLBACK_MODELS` 里的备用模型，都失败才返回给客户端。本地额度上限见 README。
 
 ## 开发
 
