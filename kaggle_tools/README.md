@@ -91,6 +91,7 @@ $env:OPENAI_BASE_URL="http://127.0.0.1:8799/v1"; $env:OPENAI_API_KEY="unused"   
 
 ```bash
 kcloud local -r examples/example_repo                        # 1. 本地试跑（只花模型额度），push 前必做
+# kcloud local --executor modal -r examples/example_repo     #    同上，但在 Modal Sandbox 里隔离执行（见 ../docs/MODAL.md）
 kcloud dataset -r examples/example_repo --dry-run            # 2. 先预览要上传什么
 kcloud dataset -r examples/example_repo -y                   #    上传为私有数据集
 kcloud push -d <用户名>/example-repo -y                       # 3. 推任务（⚠ 永久，无法删除）

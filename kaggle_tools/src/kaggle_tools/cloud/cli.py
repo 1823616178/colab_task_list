@@ -183,9 +183,21 @@ def command_local(args: argparse.Namespace) -> int:
     print(f"任务: {task_file.name}")
     print(f"模型: {environment['LLM_DEFAULT']}")
     print(f"产物: {work_directory}\n")
-    exit_code = subprocess.run(
-        [sys.executable, str(task_file)], env=environment, cwd=work_directory
-    ).returncode
+    if getattr(args, "executor", "local") == "modal":
+        from .modal_exec import run_in_modal
+
+        print("执行器: Modal Sandbox(模型仍走 Kaggle 额度)")
+        forwarded = {key: value for key, value in environment.items()
+                     if key.startswith(("MODEL_PROXY_", "LLM_", "CODEGEN_", "SPEC_"))}
+        exit_code = run_in_modal(
+            task_file, forwarded, work_directory,
+            repo=Path(args.repo).resolve() if args.repo else None,
+            gpu=getattr(args, "modal_gpu", None),
+        )
+    else:
+        exit_code = subprocess.run(
+            [sys.executable, str(task_file)], env=environment, cwd=work_directory
+        ).returncode
     if work_directory.is_relative_to(RUNS_DIRECTORY.resolve()):
         mark_latest(RUNS_DIRECTORY, "local", work_directory)
     report_diff(work_directory)
@@ -421,6 +433,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     local_parser = subparsers.add_parser("local", help="本地试跑(push 前必做)")
     local_parser.add_argument("-m", "--model", default=None)
+    local_parser.add_argument("--executor", choices=("local", "modal"), default="local",
+                              help="执行器: local(本机, 默认) | modal(Modal Sandbox 隔离执行)")
+    local_parser.add_argument("--modal-gpu", default=None, help="--executor modal 时可选 GPU, 如 T4")
     local_parser.add_argument("-r", "--repo", default=None, help="仓库路径(repo 任务用)")
     local_parser.add_argument("-s", "--spec", default=None, help="契约文档路径(spec 任务用)")
     local_parser.add_argument("-o", "--output", default=None,

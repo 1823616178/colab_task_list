@@ -22,6 +22,9 @@ dev = [
     "pytest==8.4.2",
     "ruff==0.14.0",
 ]
+modal = [
+    "modal>=1.0,<2",
+]
 
 [project.scripts]
 kllm = "kaggle_tools.kllm.cli:main"
