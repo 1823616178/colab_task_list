@@ -23,6 +23,21 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
+class StderrHandler(logging.StreamHandler):
+    """每次写日志时才取 sys.stderr, 避免 stderr 被替换(测试捕获、重定向)后写到已关闭的流。"""
+
+    def __init__(self) -> None:
+        super().__init__(sys.stderr)
+
+    @property
+    def stream(self):
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, _value) -> None:
+        pass
+
+
 def setup_logging(level: str = "INFO", log_file: Path | None = None) -> None:
     """配置 kaggle_tools 根 logger; 重复调用是幂等的。"""
     logger = logging.getLogger("kaggle_tools")
@@ -30,7 +45,7 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None) -> None:
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
         handler.close()
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    handlers: list[logging.Handler] = [StderrHandler()]
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(log_file, encoding="utf-8"))

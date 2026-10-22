@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .errors import ConfigError
 
@@ -65,6 +67,18 @@ class Settings:
     cloud_run_wait_seconds: int = 900
     cloud_push_wait_seconds: int = 600
     kaggle_cli_timeout_seconds: float = 1800.0
+    # 额度控制: 达到 warn_ratio 告警, 达到上限返回 429; 上限 <= 0 表示不限制。
+    daily_limit_dollars: float = DAILY_BUDGET_DOLLARS
+    monthly_limit_dollars: float = MONTHLY_BUDGET_DOLLARS
+    budget_warn_ratio: float = 0.8
+    # 用量按哪个时区切分"今天/本月"。
+    usage_timezone: str = "Asia/Shanghai"
+    # 同时转发给上游的请求数上限, 多出的排队等待。
+    max_concurrency: int = 4
+    # 默认只重试不会重复计费的状态; 500/502 可能上游已处理, 需显式加入。
+    retry_statuses: tuple[int, ...] = (429, 503)
+    # 首选模型失败(429/5xx/网络)时依次尝试的备用模型。
+    fallback_models: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not 1 <= self.port <= 65535:
@@ -85,6 +99,22 @@ class Settings:
             raise ConfigError(f"KLLM_LOG_LEVEL 只能是 {'/'.join(LOG_LEVELS)}, 收到 {self.log_level}")
         if not self.host:
             raise ConfigError("KLLM_HOST 不能为空")
+        if not 0 < self.budget_warn_ratio <= 1:
+            raise ConfigError(f"KLLM_BUDGET_WARN_RATIO 须在 (0, 1] 之间, 收到 {self.budget_warn_ratio}")
+        if self.max_concurrency < 1:
+            raise ConfigError(f"KLLM_MAX_CONCURRENCY 至少为 1, 收到 {self.max_concurrency}")
+        for code in self.retry_statuses:
+            if not 400 <= code <= 599:
+                raise ConfigError(f"KLLM_RETRY_STATUSES 只能包含 4xx/5xx, 收到 {code}")
+        try:
+            self.tzinfo  # noqa: B018 - 校验时区名
+        except Exception as error:  # noqa: BLE001
+            raise ConfigError(f"KLLM_TIMEZONE 不是有效时区: {self.usage_timezone!r}") from error
+
+    @property
+    def tzinfo(self) -> tzinfo:
+        """用量切分所用的时区。"""
+        return ZoneInfo(self.usage_timezone)
 
     @property
     def credentials_path(self) -> Path:
@@ -146,6 +176,21 @@ def _number(environ: Mapping[str, str], name: str, default, cast):
         raise ConfigError(f"{name} 应为{'整数' if cast is int else '数字'}, 收到 {raw!r}") from None
 
 
+def _csv(environ: Mapping[str, str], name: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in environ.get(name, "").split(",") if item.strip())
+
+
+def _statuses(environ: Mapping[str, str], default: tuple[int, ...]) -> tuple[int, ...]:
+    if "KLLM_RETRY_STATUSES" not in environ:
+        return default
+    try:
+        return tuple(int(item) for item in _csv(environ, "KLLM_RETRY_STATUSES"))
+    except ValueError:
+        raise ConfigError(
+            f"KLLM_RETRY_STATUSES 应为逗号分隔的状态码, 收到 {environ['KLLM_RETRY_STATUSES']!r}"
+        ) from None
+
+
 def load_settings(environ: Mapping[str, str] | None = None,
                   env_file: Path | None = None) -> Settings:
     """从环境变量(及 .env)构造并校验 Settings。"""
@@ -168,4 +213,11 @@ def load_settings(environ: Mapping[str, str] | None = None,
         cloud_run_wait_seconds=_number(env, "KCLOUD_RUN_WAIT", 900, int),
         cloud_push_wait_seconds=_number(env, "KCLOUD_PUSH_WAIT", 600, int),
         kaggle_cli_timeout_seconds=_number(env, "KAGGLE_CLI_TIMEOUT", 1800.0, float),
+        daily_limit_dollars=_number(env, "KLLM_DAILY_LIMIT", DAILY_BUDGET_DOLLARS, float),
+        monthly_limit_dollars=_number(env, "KLLM_MONTHLY_LIMIT", MONTHLY_BUDGET_DOLLARS, float),
+        budget_warn_ratio=_number(env, "KLLM_BUDGET_WARN_RATIO", 0.8, float),
+        usage_timezone=env.get("KLLM_TIMEZONE", "").strip() or "Asia/Shanghai",
+        max_concurrency=_number(env, "KLLM_MAX_CONCURRENCY", 4, int),
+        retry_statuses=_statuses(env, (429, 503)),
+        fallback_models=_csv(env, "KLLM_FALLBACK_MODELS"),
     )

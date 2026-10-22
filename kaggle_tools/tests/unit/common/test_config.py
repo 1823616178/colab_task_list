@@ -62,3 +62,34 @@ def test_legacy_positional_settings_still_work(tmp_path):
     settings = Settings("127.0.0.1", 8799, None, Path(tmp_path), 60.0)
     assert settings.credentials_path == tmp_path / "credentials.json"
     assert settings.usage_path == tmp_path / "usage.jsonl"
+
+
+def test_new_options_are_parsed(tmp_path):
+    settings = load_settings(
+        environ={"KLLM_DAILY_LIMIT": "5", "KLLM_MONTHLY_LIMIT": "0", "KLLM_BUDGET_WARN_RATIO": "0.5",
+                 "KLLM_TIMEZONE": "UTC", "KLLM_MAX_CONCURRENCY": "8",
+                 "KLLM_RETRY_STATUSES": "429, 500,502,503",
+                 "KLLM_FALLBACK_MODELS": "a/b, c/d ,"},
+        env_file=tmp_path / "missing.env",
+    )
+    assert settings.daily_limit_dollars == 5.0 and settings.monthly_limit_dollars == 0.0
+    assert settings.usage_timezone == "UTC"
+    assert settings.max_concurrency == 8
+    assert settings.retry_statuses == (429, 500, 502, 503)
+    assert settings.fallback_models == ("a/b", "c/d")
+
+
+def test_default_timezone_and_retry_statuses(tmp_path):
+    settings = load_settings(environ={}, env_file=tmp_path / "missing.env")
+    assert settings.usage_timezone == "Asia/Shanghai"
+    assert settings.retry_statuses == (429, 503)
+
+
+@pytest.mark.parametrize("name, value", [
+    ("KLLM_TIMEZONE", "Mars/Olympus"), ("KLLM_MAX_CONCURRENCY", "0"),
+    ("KLLM_BUDGET_WARN_RATIO", "1.5"), ("KLLM_RETRY_STATUSES", "200"),
+    ("KLLM_RETRY_STATUSES", "abc"),
+])
+def test_invalid_new_options(tmp_path, name, value):
+    with pytest.raises(ConfigError, match=name):
+        load_settings(environ={name: value}, env_file=tmp_path / "missing.env")
