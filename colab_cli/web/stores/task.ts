@@ -20,6 +20,8 @@ export interface TaskRow {
   workflowConfigId: number
   workflowName: string
   sessionName: string
+  /** 计算后端 colab | kaggle | modal（迁移 013 之前的行为 colab） */
+  backend?: string
   acceleratorKind: 'gpu' | 'tpu'
   acceleratorSpec: string
   mountDrive: boolean
@@ -59,6 +61,8 @@ export interface SubmitTaskPayload {
   api_json: string | null
   session: string
   accelerator: { kind: 'gpu' | 'tpu', spec: string }
+  /** 计算后端，缺省 colab */
+  backend?: 'colab' | 'kaggle' | 'modal'
   mount_drive: boolean
   reuse: boolean
   keep: boolean

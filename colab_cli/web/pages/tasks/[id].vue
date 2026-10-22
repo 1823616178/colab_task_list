@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { backendLabel } from '~/utils/computeBackends'
 import { extractApiError, useAuthStore } from '~/stores/auth'
 import { isTerminalStatus, TASK_STATUS_LABELS, useTaskStore } from '~/stores/task'
 import type { TaskRetention, TaskRow } from '~/stores/task'
@@ -175,6 +176,7 @@ async function onDownload(kind: 'output' | 'log') {
       <p class="container_task_detail_summary_row">
         工作流：{{ task.workflowName }} ·
         会话：{{ task.sessionName }} ·
+        后端：{{ backendLabel(task.backend) }} ·
         加速器：{{ task.acceleratorKind.toUpperCase() }} {{ task.acceleratorSpec }}
       </p>
       <p class="container_task_detail_summary_row">

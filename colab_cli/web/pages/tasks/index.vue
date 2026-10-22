@@ -2,6 +2,7 @@
 import { extractApiError, useAuthStore } from '~/stores/auth'
 import { isTerminalStatus, TASK_STATUS_LABELS, useTaskStore } from '~/stores/task'
 import type { TaskRow, TaskStatus } from '~/stores/task'
+import { backendLabel } from '~/utils/computeBackends'
 
 // /tasks 任务列表（viewer+，doc/04 §2）：状态筛选 + 分页；
 // recoverable 行置顶 + 高亮（data-status 表达状态，doc/04 §1.3）——
@@ -159,7 +160,7 @@ onMounted(refresh)
             </td>
             <td class="container_task_list_cell_session" data-label="会话">{{ task.sessionName }}</td>
             <td class="container_task_list_cell_gpu" data-label="加速器">
-              {{ task.acceleratorKind.toUpperCase() }} {{ task.acceleratorSpec }}
+              {{ backendLabel(task.backend) }} · {{ task.acceleratorKind.toUpperCase() }} {{ task.acceleratorSpec }}
             </td>
             <td class="container_task_list_cell_time" data-label="提交时间">{{ formatLocalTime(task.queuedAt) }}</td>
             <td class="container_task_list_cell_duration" data-label="耗时">{{ formatDurationMs(task.durationMs) }}</td>

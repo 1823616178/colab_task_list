@@ -6,6 +6,13 @@ import { useTaskStore } from '~/stores/task'
 import type { SubmitTaskPayload } from '~/stores/task'
 import { useUiStore } from '~/stores/ui'
 import { useWorkflowStore } from '~/stores/workflow'
+import {
+  BACKEND_GPU_SPECS,
+  BACKEND_LABELS,
+  BACKEND_TPU_SPECS,
+  COMPUTE_BACKENDS,
+} from '~/utils/computeBackends'
+import type { ComputeBackend } from '~/utils/computeBackends'
 import type { WorkflowItem } from '~/stores/workflow'
 import {
   parseWorkflowDraftRecord,
@@ -30,13 +37,12 @@ const apiFetch = useNuxtApp().$apiFetch
 const isOperator = computed(() =>
   authStore.user?.role === 'admin' || authStore.user?.role === 'operator')
 
-const GPU_SPECS = ['T4', 'L4', 'G4', 'H100', 'A100']
-const TPU_SPECS = ['v5e1', 'v6e1']
 const SESSION_NAME_PATTERN = /^[a-zA-Z0-9_.-]{1,128}$/
 
 // ── 表单字段（与 doc/02 §2.3 请求体一一对应）─────────────────────
 const workflowConfig = ref('')
 const sessionName = ref('comfyui-h3')
+const backend = ref<ComputeBackend>('colab')
 const acceleratorKind = ref<'gpu' | 'tpu'>('gpu')
 const acceleratorSpec = ref('T4')
 const mountDrive = ref(true)
@@ -482,14 +488,19 @@ onBeforeUnmount(() => {
   void flushCurrentWorkflowDraft()
 })
 
-const specOptions = computed(() => (acceleratorKind.value === 'gpu' ? GPU_SPECS : TPU_SPECS))
+const specOptions = computed(() =>
+  (acceleratorKind.value === 'gpu' ? BACKEND_GPU_SPECS : BACKEND_TPU_SPECS)[backend.value])
 
-watch(acceleratorKind, kind => {
-  acceleratorSpec.value = kind === 'gpu' ? GPU_SPECS[0]! : TPU_SPECS[0]!
+watch([acceleratorKind, backend], () => {
+  if (BACKEND_TPU_SPECS[backend.value].length === 0) acceleratorKind.value = 'gpu'
+  if (!specOptions.value.includes(acceleratorSpec.value)) {
+    acceleratorSpec.value = specOptions.value[0] ?? 'T4'
+  }
 })
 
 /** doc/04 §2.1：supportedAccelerators 之外的加速器置灰，title 显示 acceleratorNote */
 function acceleratorSupported(kind: 'gpu' | 'tpu'): boolean {
+  if (kind === 'tpu' && BACKEND_TPU_SPECS[backend.value].length === 0) return false
   const wf = selectedWorkflow.value
   if (!wf || wf.supportedAccelerators.length === 0) return true
   return wf.supportedAccelerators.includes(kind)
@@ -497,6 +508,7 @@ function acceleratorSupported(kind: 'gpu' | 'tpu'): boolean {
 
 function acceleratorDisabledTitle(kind: 'gpu' | 'tpu'): string {
   if (acceleratorSupported(kind)) return ''
+  if (kind === 'tpu' && BACKEND_TPU_SPECS[backend.value].length === 0) return `${BACKEND_LABELS[backend.value]} 后端不支持 TPU`
   return selectedWorkflow.value?.acceleratorNote
     ?? `工作流 ${selectedWorkflow.value?.name ?? ''} 不支持 ${kind.toUpperCase()}`
 }
@@ -589,6 +601,7 @@ async function onSubmit() {
       api_json: null,
       session: sessionName.value.trim(),
       accelerator: { kind: acceleratorKind.value, spec: acceleratorSpec.value },
+      backend: backend.value,
       mount_drive: mountDrive.value,
       reuse: reuse.value,
       keep: keep.value,
@@ -941,6 +954,12 @@ onMounted(async () => {
 
               <fieldset v-if="!reuse" class="container_task_create_toolbar_gpu">
                 <legend class="container_task_create_form_legend">加速器与算力规格</legend>
+                <label class="container_task_create_form_spec">
+                  <span class="container_task_create_cell_speclabel">计算后端</span>
+                  <select v-model="backend" name="compute-backend">
+                    <option v-for="item in COMPUTE_BACKENDS" :key="item" :value="item">{{ BACKEND_LABELS[item] }}</option>
+                  </select>
+                </label>
                 <div class="container_task_create_panel_pillgroup">
                   <label
                     v-for="kind in (['gpu', 'tpu'] as const)"
@@ -1032,7 +1051,7 @@ onMounted(async () => {
                 <div class="container_task_create_cell_summaryitem">
                   <span class="container_task_create_cell_summarylabel">算力架构</span>
                   <span class="container_task_create_cell_summaryval">
-                    {{ reuse ? '复用现有 VM' : `${acceleratorKind.toUpperCase()} · ${acceleratorSpec}` }}
+                    {{ reuse ? '复用现有 VM' : `${BACKEND_LABELS[backend]} · ${acceleratorKind.toUpperCase()} · ${acceleratorSpec}` }}
                   </span>
                 </div>
                 <div class="container_task_create_cell_summaryitem">

@@ -25,6 +25,8 @@ export interface Task {
   workflowName: string
   /** 弱引用，不设 FK（会话会被删） */
   sessionName: string
+  /** 计算后端：colab | kaggle | modal */
+  backend: string
   acceleratorKind: 'gpu' | 'tpu'
   acceleratorSpec: string
   mountDrive: boolean
@@ -89,6 +91,7 @@ export const TaskSchema = new EntitySchema<Task>({
     workflowConfigId: { type: 'int' },
     workflowName: { type: 'varchar', length: 255 },
     sessionName: { type: 'varchar', length: 128 },
+    backend: { type: 'varchar', length: 16, default: 'colab' },
     acceleratorKind: { type: 'enum', enum: ['gpu', 'tpu'] },
     acceleratorSpec: { type: 'varchar', length: 16 },
     mountDrive: { type: 'boolean', default: true },

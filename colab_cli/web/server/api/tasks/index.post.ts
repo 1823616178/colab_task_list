@@ -27,8 +27,13 @@ import {
 import { findLiveSessionConflict } from '../../services/sessionReconcileRules'
 import type { RunnerSessionSnapshot } from '../../services/sessionReconcileRules'
 
-const GPU_SPECS = ['T4', 'L4', 'G4', 'H100', 'A100']
-const TPU_SPECS = ['v5e1', 'v6e1']
+import {
+  BACKEND_GPU_SPECS,
+  BACKEND_TPU_SPECS,
+  COMPUTE_BACKENDS,
+  isComputeBackend,
+} from '../../../utils/computeBackends'
+
 const SESSION_NAME_PATTERN = /^[a-zA-Z0-9_.-]{1,128}$/
 const WORKFLOW_SLUG_PATTERN = /^[a-zA-Z0-9_.-]{1,128}$/
 
@@ -59,9 +64,14 @@ export default defineEventHandler(async (event) => {
   if (kind !== 'gpu' && kind !== 'tpu') {
     return sendApiError(event, 400, 'ACCELERATOR_UNSUPPORTED', `未知加速器类型: ${kind}`)
   }
-  const validSpecs = kind === 'gpu' ? GPU_SPECS : TPU_SPECS
+  const backend = body.backend === undefined || body.backend === null ? 'colab' : body.backend
+  if (!isComputeBackend(backend)) {
+    return sendApiError(event, 400, 'BAD_REQUEST', `未知计算后端: ${String(backend)}，可选: ${COMPUTE_BACKENDS.join(', ')}`)
+  }
+  const validSpecs = (kind === 'gpu' ? BACKEND_GPU_SPECS : BACKEND_TPU_SPECS)[backend]
   if (!validSpecs.includes(spec)) {
-    return sendApiError(event, 400, 'ACCELERATOR_UNSUPPORTED', `${kind} 不支持规格 ${spec}，可选: ${validSpecs.join(', ')}`)
+    return sendApiError(event, 400, 'ACCELERATOR_UNSUPPORTED',
+      `${backend} 后端的 ${kind} 不支持规格 ${spec}，可选: ${validSpecs.join(', ') || '无'}`)
   }
   const session = typeof body.session === 'string' && body.session ? body.session : 'comfyui-h3'
   if (!SESSION_NAME_PATTERN.test(session)) {
@@ -100,7 +110,8 @@ export default defineEventHandler(async (event) => {
   const ds = await getDataSource()
   // 新建模式不能覆盖同名映射：colab CLI 覆盖本地 name→endpoint 后，旧 VM 会
   // 变成名称为 "?" 的计费孤儿。DB endpoint 可在名称丢失时兜底识别旧 VM。
-  if (!dryRun && !reuse) {
+  // Colab 才有「同名映射覆盖成孤儿 VM」问题；Kaggle/Modal 的会话由各自后端管理
+  if (!dryRun && !reuse && backend === 'colab') {
     let runnerSessions: RunnerSessionSnapshot[]
     try {
       runnerSessions = await runnerRequest<RunnerSessionSnapshot[]>('/sessions')
@@ -157,6 +168,7 @@ export default defineEventHandler(async (event) => {
         api_json: body.api_json ?? null,
         session,
         accelerator: { kind, spec },
+        backend,
         mount_drive: mountDrive,
         reuse,
         keep,
@@ -179,6 +191,7 @@ export default defineEventHandler(async (event) => {
       workflowConfigId: workflow.id,
       workflowName: workflow.name,
       sessionName: session,
+      backend,
       acceleratorKind: kind,
       acceleratorSpec: spec,
       mountDrive,
@@ -215,6 +228,7 @@ export default defineEventHandler(async (event) => {
       workflow: workflow.slug,
       session,
       accelerator: { kind, spec },
+      backend,
       reuse,
       keep,
       dry_run: dryRun,
