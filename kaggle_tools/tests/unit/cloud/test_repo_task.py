@@ -4,28 +4,18 @@
 """
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
-CLOUD_CODEGEN_DIR = Path(__file__).resolve().parents[1]
-TASKS_DIR = CLOUD_CODEGEN_DIR / "tasks"
-EXAMPLE_REPO = CLOUD_CODEGEN_DIR / "examples" / "example_repo"
+from tests.conftest import EXAMPLES
+
+EXAMPLE_REPO = EXAMPLES / "example_repo"
 
 
 @pytest.fixture
-def task(tmp_path, monkeypatch):
-    """加载任务模块并把工作区指到临时目录。"""
-    monkeypatch.setenv("CODEGEN_IMPORT_ONLY", "1")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.syspath_prepend(str(TASKS_DIR))
-    sys.modules.pop("repo_task", None)
-    import repo_task
-
-    monkeypatch.setattr(repo_task, "OUTPUT_DIRECTORY", tmp_path)
-    monkeypatch.setattr(repo_task, "WORKSPACE", tmp_path / "workspace")
-    return repo_task
+def task(load_task):
+    """加载构建后的仓库改造任务, 工作区指到临时目录。"""
+    return load_task("repo_task.py")
 
 
 def test_workspace_snapshot_only_tracks_repo_files(task):

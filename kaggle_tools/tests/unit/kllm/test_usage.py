@@ -1,6 +1,6 @@
 """用量账本的提取与汇总。"""
 
-from kllm.usage import extract_record, format_report, load_records, append_record, summarize
+from kaggle_tools.kllm.usage import extract_record, format_report, load_records, append_record, summarize
 
 
 def test_extract_record_sums_input_and_output_cost():

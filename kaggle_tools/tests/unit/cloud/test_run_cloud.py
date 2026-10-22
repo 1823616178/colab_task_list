@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import run_cloud
+from kaggle_tools.cloud import cli as run_cloud
 
 
 def test_task_files_are_grouped_under_tasks_directory():

@@ -3,29 +3,16 @@
 这个评测的有效性完全建立在「模型读不到验收测试」上, 所以这条要有测试兜着。
 """
 
-import sys
-from pathlib import Path
-
 import pytest
-
-CLOUD_CODEGEN_DIR = Path(__file__).resolve().parents[1]
-TASKS_DIR = CLOUD_CODEGEN_DIR / "tasks"
 
 
 @pytest.fixture
-def task(tmp_path, monkeypatch):
-    """加载任务模块并把工作区与验收目录指到临时目录。"""
-    monkeypatch.setenv("CODEGEN_IMPORT_ONLY", "1")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.syspath_prepend(str(TASKS_DIR))
-    sys.modules.pop("spec_task", None)
-    import spec_task
-
-    monkeypatch.setattr(spec_task, "OUTPUT_DIRECTORY", tmp_path)
-    monkeypatch.setattr(spec_task, "WORKSPACE", tmp_path / "workspace")
-    monkeypatch.setattr(spec_task, "ACCEPTANCE_DIRECTORY", tmp_path / "_acceptance")
-    spec_task.prepare_directories()
-    return spec_task
+def task(load_task, tmp_path, monkeypatch):
+    """加载构建后的契约任务, 工作区与验收目录指到临时目录。"""
+    module = load_task("spec_task.py")
+    monkeypatch.setattr(module, "ACCEPTANCE_DIRECTORY", tmp_path / "_acceptance")
+    module.prepare_directories()
+    return module
 
 
 def test_acceptance_tests_live_outside_the_workspace(task):

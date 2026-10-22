@@ -5,9 +5,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from kllm import credentials as credentials_module
-from kllm.config import Settings
-from kllm.credentials import CredentialError, ProxyCredentials, TokenManager
+from kaggle_tools.kllm import credentials as credentials_module
+from kaggle_tools.kllm.config import Settings
+from kaggle_tools.kllm.credentials import CredentialError, ProxyCredentials, TokenManager
 
 
 def make_settings(tmp_path) -> Settings:

@@ -7,10 +7,10 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from kllm.config import Settings
-from kllm.credentials import ProxyCredentials
-from kllm.server import create_app
-from kllm.usage import load_records
+from kaggle_tools.kllm.config import Settings
+from kaggle_tools.kllm.credentials import ProxyCredentials
+from kaggle_tools.kllm.server import create_app
+from kaggle_tools.kllm.usage import load_records
 
 COMPLETION_BODY = {
     "choices": [{"message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}],
