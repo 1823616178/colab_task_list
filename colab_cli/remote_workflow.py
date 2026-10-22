@@ -746,6 +746,10 @@ def wait_for_output_transfer_client(
         separators=(",", ":"),
     )
     print(f"{OUTPUT_STREAM_PREFIX}READY:{metadata}", flush=True)
+    if os.environ.get("REMOTE_OUTPUT_NO_WAIT") == "1":
+        # 批处理后端（Kaggle/Modal）：本地在脚本结束后直接读分块，无需握手
+        print(">>> REMOTE_OUTPUT_NO_WAIT=1：输出分块已就绪，不等待下载确认", flush=True)
+        return
 
     started_at = time.monotonic()
     initial_deadline = started_at + OUTPUT_TRANSFER_INITIAL_WAIT_SECONDS

@@ -32,6 +32,7 @@ __all__ = [
 ]
 
 TRANSPORT_MODES = ("native", "cli")
+BACKENDS = ("colab", "kaggle", "modal")
 
 
 def colab_cli_version() -> Optional[str]:
@@ -77,8 +78,26 @@ def probe_private_api() -> dict:
 def get_transport(
     mode: Optional[str] = None,
     sink: Optional[EventSink] = None,
+    backend: Optional[str] = None,
 ) -> Transport:
-    """按模式构造通道；native 探测失败时自动降级 cli 并告警。"""
+    """按计算后端 + 模式构造通道。
+
+    backend: colab（默认，读 COMPUTE_BACKEND）| kaggle | modal。
+    colab 后端内 native 探测失败时自动降级 cli 并告警。
+    """
+    selected_backend = (backend or os.environ.get("COMPUTE_BACKEND") or "colab").lower()
+    if selected_backend == "modal":
+        from .modal_backend import ModalTransport
+
+        return ModalTransport(sink)
+    if selected_backend == "kaggle":
+        from .kaggle_backend import KaggleTransport
+
+        return KaggleTransport(sink)
+    if selected_backend != "colab":
+        raise ValueError(
+            f"未知计算后端: {selected_backend!r}（可选: colab | kaggle | modal）"
+        )
     selected = (mode or os.environ.get("COLAB_TRANSPORT") or "native").lower()
     if selected not in TRANSPORT_MODES:
         raise ValueError(

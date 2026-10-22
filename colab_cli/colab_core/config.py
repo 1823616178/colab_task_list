@@ -11,6 +11,28 @@ GPU_SPECS = ("T4", "L4", "G4", "H100", "A100")
 TPU_SPECS = ("v5e1", "v6e1")
 ACCELERATOR_KINDS = ("gpu", "tpu")
 
+# 计算后端：同一套 ComfyUI/MiniMax 工作流可跑在三种云上。
+BACKENDS = ("colab", "kaggle", "modal")
+DEFAULT_BACKEND = "colab"
+# 各后端可选 GPU 规格（kind=gpu）。TPU 目前只在 Colab 后端开放。
+BACKEND_GPU_SPECS = {
+    "colab": GPU_SPECS,
+    "kaggle": ("T4", "T4x2", "P100"),
+    "modal": ("T4", "L4", "A10", "L40S", "A100", "A100-80GB", "H100", "H200", "B200"),
+}
+BACKEND_TPU_SPECS = {"colab": TPU_SPECS, "kaggle": (), "modal": ()}
+ALL_GPU_SPECS = tuple(dict.fromkeys(s for specs in BACKEND_GPU_SPECS.values() for s in specs))
+
+
+def resolve_backend(value: Optional[str]) -> str:
+    """显式值 > COMPUTE_BACKEND 环境变量 > colab。"""
+    import os
+
+    selected = (value or os.environ.get("COMPUTE_BACKEND") or DEFAULT_BACKEND).lower()
+    if selected not in BACKENDS:
+        raise ValueError(f"未知计算后端: {selected!r}，可选: {', '.join(BACKENDS)}")
+    return selected
+
 
 @dataclass
 class TaskConfig:
@@ -39,8 +61,10 @@ class TaskConfig:
     output_dir: Optional[Path] = None
     transport_mode: Optional[str] = None
     recovery_command: Optional[str] = None
+    backend: Optional[str] = None
 
     def __post_init__(self) -> None:
+        self.backend = resolve_backend(self.backend)
         self.workflow_config = Path(self.workflow_config).expanduser().resolve()
         if self.api_json is not None:
             self.api_json = Path(self.api_json).expanduser().resolve()
@@ -57,11 +81,14 @@ class TaskConfig:
             raise TypeError("workflow_overrides 的键和值必须是字符串")
         if self.accelerator_kind not in ACCELERATOR_KINDS:
             raise ValueError(f"未知加速器类型: {self.accelerator_kind!r}")
-        valid_specs = GPU_SPECS if self.accelerator_kind == "gpu" else TPU_SPECS
+        valid_specs = (
+            BACKEND_GPU_SPECS if self.accelerator_kind == "gpu" else BACKEND_TPU_SPECS
+        )[self.backend]
         if self.accelerator_spec not in valid_specs:
             raise ValueError(
-                f"{self.accelerator_kind} 不支持规格 {self.accelerator_spec!r}，"
-                f"可选: {', '.join(valid_specs)}"
+                f"{self.backend} 后端的 {self.accelerator_kind} 不支持规格 "
+                f"{self.accelerator_spec!r}，"
+                f"可选: {', '.join(valid_specs) or '无'}"
             )
 
     @classmethod
@@ -85,6 +112,7 @@ class TaskConfig:
             workflow_overrides=payload.get("workflow_overrides") or {},
             timeout=float(payload.get("timeout", 86400.0)),
             dry_run=bool(payload.get("dry_run", False)),
+            backend=payload.get("backend") or None,
         )
 
 

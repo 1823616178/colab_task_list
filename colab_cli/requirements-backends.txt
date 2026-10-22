@@ -1,0 +1,3 @@
+# 可选：Kaggle / Modal 计算后端（Colab 不需要）
+kaggle>=1.7
+modal>=1.0,<2

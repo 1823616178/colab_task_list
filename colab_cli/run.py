@@ -18,6 +18,7 @@ from colab_core import (
     make_cli_emit,
     run_task,
 )
+from colab_core.config import ALL_GPU_SPECS, BACKENDS, resolve_backend
 from colab_core.paths import HERE, REMOTE_SETUP, REMOTE_WORKFLOW
 from colab_core.sessions import (
     ensure_reusable_session,
@@ -69,15 +70,21 @@ def main():
     accelerator_group = parser.add_mutually_exclusive_group()
     accelerator_group.add_argument(
         "--gpu",
-        choices=("T4", "L4", "G4", "H100", "A100"),
+        choices=ALL_GPU_SPECS,
         default=None,
-        help="GPU 规格；未指定 GPU/TPU 时默认 T4",
+        help="GPU 规格（按后端校验）；未指定 GPU/TPU 时默认 T4",
     )
     accelerator_group.add_argument(
         "--tpu",
         choices=("v5e1", "v6e1"),
         default=None,
         help="TPU 规格；仅适用于声明支持 TPU 的工作流",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default=None,
+        help="计算后端：colab（默认）| kaggle | modal；也可用 COMPUTE_BACKEND 环境变量",
     )
     parser.add_argument("--session", default="comfyui-h3")
     parser.add_argument("--workflow-config", default=str(DEFAULT_WORKFLOW_CONFIG),
@@ -122,11 +129,17 @@ def main():
     )
     args = parser.parse_args()
 
-    if not args.dry_run and not shutil.which("colab"):
+    backend = resolve_backend(args.backend)
+    args.backend = backend
+    if backend == "colab" and not args.dry_run and not shutil.which("colab"):
         sys.exit("找不到 colab 命令, 请先: pip install google-colab-cli")
 
     if args.stop:
-        stop_named_session(args.session)
+        if backend == "colab":
+            stop_named_session(args.session)
+        else:
+            get_transport(None, backend=backend).stop_session(args.session)
+            print(f">>> 已停止 {backend} 会话: {args.session}", flush=True)
         return
     if args.stop_endpoint:
         stop_unmapped_endpoint(args.stop_endpoint)
@@ -141,7 +154,7 @@ def main():
         def sink(phase, status, message, data=None):
             emitter.emit(phase, status, message, data)
 
-        transport = get_transport(None, sink=sink)
+        transport = get_transport(None, sink=sink, backend=args.backend)
         ensure_reusable_session(args.session, transport, emitter)
         recovery_dir = default_output_root() / recovery_id
         recovery_dir.mkdir(parents=True, exist_ok=True)
@@ -165,6 +178,7 @@ def main():
         input_dir=Path(args.input_dir) if args.input_dir else None,
         timeout=args.timeout,
         dry_run=args.dry_run,
+        backend=args.backend,
         recovery_command=(
             f"{sys.executable} {Path(__file__).resolve()} "
             f"--session {args.session} --download-only"

@@ -212,7 +212,7 @@ def _run_real(
     task_id: str,
     started_monotonic: float,
 ) -> TaskResult:
-    transport = get_transport(cfg.transport_mode, sink=_sink(emitter))
+    transport = get_transport(cfg.transport_mode, sink=_sink(emitter), backend=cfg.backend)
 
     # ── 预检段（旧 main() try 块之前的部分）：失败不触碰会话 ──
     try:
@@ -262,6 +262,7 @@ def _run_real(
                 "mount_drive": cfg.mount_drive,
                 "timeout": cfg.timeout,
                 "transport": transport.mode,
+                "backend": cfg.backend,
             },
         )
         emitter.emit(

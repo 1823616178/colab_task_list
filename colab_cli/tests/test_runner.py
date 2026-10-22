@@ -553,7 +553,7 @@ def test_redownload_flow(client, mini_workflow, monkeypatch):
     monkeypatch.setattr(runner_manager, "run_task", _fake_failed_run_task)
     monkeypatch.setattr(
         runner_manager, "get_transport",
-        lambda mode=None, sink=None: _FakeTransport())
+        lambda mode=None, sink=None, **_: _FakeTransport())
 
     task_id = submit(client, mini_workflow, session="s-redl")
     snapshot = wait_status(client, task_id)
@@ -597,7 +597,7 @@ def test_redownload_after_cancel(client, mini_workflow, monkeypatch):
         lambda session, mode: (True, ""))
     monkeypatch.setattr(
         runner_manager, "get_transport",
-        lambda mode=None, sink=None: _FakeTransport())
+        lambda mode=None, sink=None, **_: _FakeTransport())
 
     task_id = submit(client, mini_workflow, session="s-cancel-redl")
     wait_status(client, task_id, targets=("running",))
@@ -631,7 +631,7 @@ def test_redownload_after_registry_miss(client, mini_workflow, monkeypatch):
     monkeypatch.setattr(runner_manager, "run_task", _fake_failed_run_task)
     monkeypatch.setattr(
         runner_manager, "get_transport",
-        lambda mode=None, sink=None: _FakeTransport())
+        lambda mode=None, sink=None, **_: _FakeTransport())
 
     task_id = submit(client, mini_workflow, session="s-redl-disk")
     snapshot = wait_status(client, task_id)

@@ -28,9 +28,14 @@ def _null_sink(phase: str, status: str, message: str, data: Any = None) -> None:
 
 
 class Transport(ABC):
-    """Colab 通道抽象。`mode` 取值 native | cli。"""
+    """计算后端通道抽象。
+
+    `backend` 取值 colab | kaggle | modal；`mode` 是后端内的通道名
+    （colab: native | cli；kaggle: kaggle；modal: modal）。
+    """
 
     mode: str = "cli"
+    backend: str = "colab"
 
     @abstractmethod
     def create_session(self, session: str, kind: str, spec: str) -> None:

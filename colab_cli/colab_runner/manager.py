@@ -145,6 +145,7 @@ class TaskRecord:
     cancel_mode: Optional[str] = None
     recovered: bool = False  # True = Runner 重启后从 runner_state.json 恢复的对账项
     transport_mode: Optional[str] = None
+    backend: Optional[str] = None
     duration_ms: Optional[int] = None
     output_zip: Optional[Path] = None
     output_size_bytes: Optional[int] = None
@@ -214,6 +215,7 @@ class TaskManager:
                 out_dir=out_dir,
                 cfg=cfg,
                 queued_at=ev.utc_now_iso(),
+                backend=cfg.backend,
             )
             record.event_log = EventLog(
                 task_id, out_dir, on_persisted=self._make_on_persisted(record)
@@ -237,6 +239,7 @@ class TaskManager:
                 {"session": cfg.session,
                  "workflow_config": str(cfg.workflow_config),
                  "dry_run": cfg.dry_run,
+                 "backend": cfg.backend,
                  "queue_position": position},
             ))
         if not enqueue:
@@ -526,7 +529,8 @@ class TaskManager:
 
         output_zip = record.out_dir / "output.zip"
         try:
-            transport = get_transport(None, sink)
+            backend = record.backend or (record.cfg.backend if record.cfg else None)
+            transport = get_transport(None, sink, backend=backend)
             transport.download_output(record.session, output_zip, sink)
             size_bytes = output_zip.stat().st_size
             sha256 = file_sha256(output_zip)
@@ -620,6 +624,7 @@ class TaskManager:
             "dry_run": bool(record.cfg.dry_run) if record.cfg else None,
             "queue_position": self.queue_position(record),
             "transport_mode": record.transport_mode,
+            "backend": record.backend or (record.cfg.backend if record.cfg else None),
             "duration_ms": record.duration_ms,
             "error": record.error,
             "output": output,
@@ -704,6 +709,11 @@ class TaskManager:
             data = event.get("data") or {}
             if isinstance(data.get("session"), str) and data["session"]:
                 record.session = data["session"]
+                break
+        for event in events:
+            data = event.get("data") or {}
+            if isinstance(data.get("backend"), str) and data["backend"]:
+                record.backend = data["backend"]
                 break
         return record
 
