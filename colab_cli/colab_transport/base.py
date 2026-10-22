@@ -85,3 +85,10 @@ class Transport(ABC):
     def download_output(self, session: str, output_zip: Path,
                         sink: EventSink = _null_sink) -> None:
         """任务结束后从会话取回输出分块并重组校验。"""
+
+    def remote_output_ready(self, session: str) -> Optional[bool]:
+        """远端产物清单（manifest.json）是否已生成；None = 本通道不支持探测。
+
+        供执行阶段断线后的 reattach 轮询使用（colab_core.resilience）。
+        """
+        return None

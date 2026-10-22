@@ -421,6 +421,20 @@ class CliTransport(Transport):
             time.sleep(2)
         return False
 
+    def remote_output_ready(self, session: str) -> bool | None:
+        """单次尝试下载远端 manifest.json：成功 = 远端已写完全部分块。"""
+        import tempfile
+
+        cli = self._cli(session)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "manifest.json"
+            result = subprocess.run(
+                cli.build("download", "-s", session,
+                          f"{REMOTE_TRANSFER_DIR}/manifest.json", str(target)),
+                capture_output=True, text=True, timeout=120, check=False,
+            )
+            return result.returncode == 0 and target.is_file()
+
     def download_output(self, session: str, output_zip: Path,
                         sink: EventSink = _null_sink) -> None:
         """下载远端输出分块，重组并验证最终 ZIP。"""

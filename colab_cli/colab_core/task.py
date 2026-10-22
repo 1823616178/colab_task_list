@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from colab_transport import TransportError, get_transport
+
+from .resilience import is_transient_error, reattach_workflow, retry_transient
 from colab_transport.transfer import file_sha256
 
 from . import events as ev
@@ -396,13 +398,16 @@ def _run_real(
                 mode="w", suffix=".json", encoding="utf-8") as config_file:
             json.dump(run_config, config_file, ensure_ascii=False)
             config_file.flush()
-            transport.upload(
-                cfg.session, config_file.name, "/content/colab_run_config.json")
-        transport.upload(cfg.session, config_snapshot, "/content/workflow_config.json")
-        transport.upload(cfg.session, api_snapshot, "/content/api.json")
+            _retrying(emitter, ev.PHASE_INPUT_UPLOAD, "上传运行配置", lambda: transport.upload(
+                cfg.session, config_file.name, "/content/colab_run_config.json"))
+        _retrying(emitter, ev.PHASE_INPUT_UPLOAD, "上传工作流配置", lambda: transport.upload(
+            cfg.session, config_snapshot, "/content/workflow_config.json"))
+        _retrying(emitter, ev.PHASE_INPUT_UPLOAD, "上传 API JSON", lambda: transport.upload(
+            cfg.session, api_snapshot, "/content/api.json"))
         for item in staged_inputs:
-            transport.upload(
-                cfg.session, item["snapshot_path"], item["remote_path"])
+            _retrying(emitter, ev.PHASE_INPUT_UPLOAD, "上传输入文件",
+                      lambda item=item: transport.upload(
+                          cfg.session, item["snapshot_path"], item["remote_path"]))
         emitter.emit(
             ev.PHASE_INPUT_UPLOAD,
             ev.STATUS_OK,
@@ -424,8 +429,9 @@ def _run_real(
                 ">>> 安装/检查 ComfyUI 通用环境",
                 {"session": cfg.session},
             )
-            transport.exec_script(
-                cfg.session, REMOTE_SETUP, cfg.timeout, _sink(emitter))
+            # 环境安装脚本幂等（依赖就绪标记文件），可安全重放
+            _retrying(emitter, ev.PHASE_ENV_SETUP, "环境安装", lambda: transport.exec_script(
+                cfg.session, REMOTE_SETUP, cfg.timeout, _sink(emitter)))
             emitter.emit(ev.PHASE_ENV_SETUP, ev.STATUS_OK, "",
                          {"session": cfg.session})
 
@@ -436,9 +442,17 @@ def _run_real(
             {"session": cfg.session, "workflow_name": workflow_name},
         )
         workflow_started = True
-        output_streamed = transport.exec_workflow(
-            cfg.session, REMOTE_WORKFLOW, cfg.timeout, output_zip, _sink(emitter)
-        )
+        try:
+            output_streamed = transport.exec_workflow(
+                cfg.session, REMOTE_WORKFLOW, cfg.timeout, output_zip, _sink(emitter)
+            )
+        except Exception as error:
+            # 执行阶段断线：不重放工作流（会重复计费、覆盖产物），
+            # 而是探测远端会话与产物清单，远端跑完后改走下载通道
+            if not is_transient_error(error) or not _reattach_after_disconnect(
+                    transport, cfg, emitter, error):
+                raise
+            output_streamed = False
         workflow_completed = True
         emitter.emit(ev.PHASE_WORKFLOW_EXEC, ev.STATUS_OK, "",
                      {"session": cfg.session})
@@ -449,7 +463,9 @@ def _run_real(
                 ">>> 执行通道未包含输出数据，改用 Contents API 兼容下载...",
                 {"reason": "stream_absent", "fallback": "cli"},
             )
-            transport.download_output(cfg.session, output_zip, _sink(emitter))
+            _retrying(emitter, ev.PHASE_OUTPUT_TRANSFER, "产物下载",
+                      lambda: transport.download_output(
+                          cfg.session, output_zip, _sink(emitter)))
         output_retrieved = True
         size_bytes = output_zip.stat().st_size
         sha256 = file_sha256(output_zip)
@@ -543,6 +559,65 @@ def _run_real(
         },
     )
     return result
+
+
+def _retrying(emitter: EventEmitter, phase: str, step: str, fn):
+    """幂等步骤的瞬时故障退避重试；每次重试发一条 warn 事件。"""
+
+    def on_retry(attempt, total, delay, error):
+        emitter.emit(
+            phase,
+            ev.STATUS_WARN,
+            f">>> {step}遇到瞬时故障，{delay:.0f} 秒后重试 ({attempt + 1}/{total}): {error}",
+            {"reason": "transient_retry", "step": step, "attempt": attempt + 1,
+             "max_attempts": total, "delay_seconds": delay,
+             "error_type": type(error).__name__},
+        )
+
+    return retry_transient(fn, step=step, on_retry=on_retry)
+
+
+def _session_alive(transport, session: str) -> bool:
+    """会话是否仍可读（ls /content 成功）；不可读 = VM 已消失或连接仍未恢复。"""
+    try:
+        transport.check_session_readable(session)
+    except TransportError:
+        return False
+    return True
+
+
+def _reattach_after_disconnect(transport, cfg: TaskConfig, emitter: EventEmitter,
+                               error: BaseException) -> bool:
+    """执行阶段连接断开后尝试重连远端进程；True = 远端已完成，可下载产物。"""
+    emitter.emit(
+        ev.PHASE_WORKFLOW_EXEC,
+        ev.STATUS_WARN,
+        f">>> 执行阶段连接断开（{error}），探测远端进程并等待其完成...",
+        {"reason": "reattach_start", "session": cfg.session,
+         "error_type": type(error).__name__},
+    )
+
+    def on_wait(elapsed, limit):
+        emitter.emit(
+            ev.PHASE_WORKFLOW_EXEC,
+            ev.STATUS_PROGRESS,
+            f">>> 等待远端工作流完成（已等待 {elapsed:.0f}/{limit:.0f} 秒）",
+            {"reason": "reattach_wait", "elapsed_seconds": round(elapsed)},
+        )
+
+    ok = reattach_workflow(
+        session_alive=lambda: _session_alive(transport, cfg.session),
+        output_ready=lambda: transport.remote_output_ready(cfg.session),
+        on_wait=on_wait,
+    )
+    emitter.emit(
+        ev.PHASE_WORKFLOW_EXEC,
+        ev.STATUS_OK if ok else ev.STATUS_WARN,
+        ">>> 已重新连接：远端工作流已完成，改用下载通道取回产物" if ok
+        else ">>> 重连失败：远端会话不可用或等待超时",
+        {"reason": "reattach_ok" if ok else "reattach_failed", "session": cfg.session},
+    )
+    return ok
 
 
 def _sink(emitter: EventEmitter):

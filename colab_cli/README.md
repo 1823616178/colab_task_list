@@ -468,3 +468,15 @@ MiniMax H3 当前只支持 GPU。ComfyUI 的设备管理没有 PyTorch/XLA 后�
 3. **快速链接**：若 Drive 中已有且大小校验通过的模型，自动创建软链接（`os.symlink`）至 ComfyUI 目录；
 4. **自动备份**：若 Drive 中尚未存在该模型，则从 HuggingFace 下载后自动复制保存到 Drive 对应文件夹，下次开机即可秒级复用；
 5. **无认证回退**：复用 VM 时若 Drive 未挂载或不可访问，不弹出认证，直接使用 VM 本地模型或重新下载。
+
+## 可靠性相关环境变量（Runner / colab_core）
+
+| 变量 | 缺省 | 说明 |
+| :--- | :--- | :--- |
+| `COLAB_SESSION_QUEUE_MAX` | 5 | 同一会话的 FIFO 排队上限（不含运行中的那个）；0 = 禁用排队，恢复 409 SESSION_BUSY |
+| `COLAB_RETRY_ATTEMPTS` | 3 | 上传 / 环境安装 / 产物下载遇瞬时故障的最大尝试次数 |
+| `COLAB_RETRY_BASE_SECONDS` | 5 | 指数退避首次等待秒数（封顶 60s） |
+| `COLAB_REATTACH_TIMEOUT` | 1800 | 执行阶段断线后等待远端完成的最长秒数；0 = 不重连 |
+| `COLAB_REATTACH_POLL_SECONDS` | 30 | 重连期间轮询远端产物清单的间隔 |
+
+提交任务时请求体可带 `"queue": false`，同会话忙时直接返回 409 而不排队。

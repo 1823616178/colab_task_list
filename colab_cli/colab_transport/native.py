@@ -522,6 +522,9 @@ class NativeTransport(Transport):
                         sink: EventSink = _null_sink) -> None:
         self._cli.download_output(session, output_zip, sink)
 
+    def remote_output_ready(self, session: str) -> bool | None:
+        return self._cli.remote_output_ready(session)
+
     def exec_workflow(
         self,
         session: str,
