@@ -175,9 +175,11 @@ onMounted(() => {
             </NuxtLink>
           </div>
 
-          <p v-if="loading" class="container_dash_list_cell_empty">
-            正在同步计算节点与任务状态…
-          </p>
+          <div v-if="loading" class="container_dash_stat_cell_loading" aria-busy="true">
+            <span data-sr-only>正在同步计算节点与任务状态…</span>
+            <div data-skeleton class="container_dash_stat_cell_skeleton" />
+            <div data-skeleton class="container_dash_stat_cell_skeleton" />
+          </div>
           <div v-else-if="runningTasks.length === 0 && queuedTasks.length === 0" class="container_dash_list_cell_empty">
             <p>当前没有排队或执行中的计算作业。</p>
             <NuxtLink v-if="isOperator" class="container_dash_stat_toolbar_link" to="/tasks/new">立即配置并投递新任务 →</NuxtLink>
@@ -594,6 +596,16 @@ onMounted(() => {
 }
 
 /* 窄屏响应式 */
+.container_dash_stat_cell_loading {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.container_dash_stat_cell_skeleton {
+  height: 64px;
+  border-radius: var(--r-md);
+}
+
 @media (width <= 960px) {
   .container_dash_stat_panel_metrics {
     grid-template-columns: repeat(2, 1fr);
@@ -606,7 +618,25 @@ onMounted(() => {
 
 @media (width <= 480px) {
   .container_dash_stat_panel_metrics {
-    grid-template-columns: 1fr;
+    gap: var(--sp-2);
+  }
+
+  .container_dash_stat_card_metric {
+    padding: var(--sp-3);
+  }
+
+  .container_dash_stat_cell_value {
+    font-size: var(--fs-2xl);
+  }
+
+  .container_dash_stat_header_root {
+    flex-direction: column;
+    gap: var(--sp-3);
+    align-items: stretch;
+  }
+
+  .container_dash_stat_header_action {
+    text-align: center;
   }
 }
 </style>

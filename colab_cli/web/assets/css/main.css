@@ -40,6 +40,26 @@
   /* ── 布局容器宽度：建议 1280–1440px 桌面上限（doc/09 §3.2） ── */
   --w-page: 1360px;
   --w-form: 680px;
+
+  /* ── 行高 / 字重 ── */
+  --lh-tight: 1.3;
+  --lh-base: 1.6;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  /* ── 控件尺寸：按钮、输入框统一高度（触屏下自动放大，见文末） ── */
+  --h-control-sm: 28px;
+  --h-control: 36px;
+  --r-pill: 999px;
+
+  /* ── 层级：顶栏 < 横幅 < 弹层 < toast ── */
+  --z-header: 50;
+  --z-overlay: 80;
+  --z-toast: 100;
+
+  /* 顶栏高度（sticky 定位与锚点偏移共用） */
+  --h-header: 52px;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -190,7 +210,9 @@ body {
   margin: 0;
   font-family: var(--ff-base);
   font-size: var(--fs-md);
-  line-height: 1.6;
+  line-height: var(--lh-base);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizelegibility;
   color: var(--c-text);
   background: var(--c-bg);
   background-image: var(--bg-pattern);
@@ -214,9 +236,24 @@ body {
   outline-offset: 2px;
 }
 
+h1,
+h2,
+h3,
+h4 {
+  line-height: var(--lh-tight);
+  letter-spacing: 0.01em;
+}
+
+/* 锚点跳转时避开 sticky 顶栏 */
+html {
+  scroll-padding-top: calc(var(--h-header) + var(--sp-4));
+}
+
 /* 默认按钮 = 次级按钮外观 */
 button {
+  min-height: var(--h-control-sm);
   padding: 6px 14px;
+  line-height: 1.4;
   font: inherit;
   color: var(--c-text);
   cursor: pointer;
@@ -357,6 +394,82 @@ time {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--c-border-strong);
+}
+
+/* ────────────────────────────────────────────────────────────────
+   跨页共享的语义属性（用 data-* 而非 class，避开 doc/04 §1.4 的
+   页面段枚举；特异度 (0,1,0)，页面 container_* 类仍可覆盖）
+   ──────────────────────────────────────────────────────────────── */
+
+/* 按钮变体：<button data-variant="primary|danger|ghost"> */
+button[data-variant='primary'] {
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-invert);
+  background: var(--c-brand);
+  border-color: var(--c-brand);
+}
+
+button[data-variant='danger'] {
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-invert);
+  background: var(--c-danger);
+  border-color: var(--c-danger);
+}
+
+button[data-variant='ghost'] {
+  background: transparent;
+  border-color: transparent;
+}
+
+/* 仅读屏可见（视觉隐藏） */
+[data-sr-only] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 加载骨架：<div data-skeleton> 占位条 */
+[data-skeleton] {
+  min-height: 14px;
+  background: linear-gradient(
+    90deg,
+    var(--c-surface-sub) 0%,
+    var(--c-surface-hover) 50%,
+    var(--c-surface-sub) 100%
+  );
+  background-size: 200% 100%;
+  border-radius: var(--r-sm);
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* 繁忙态：aria-busy 的区域降低不透明度，提示数据刷新中 */
+[aria-busy='true'] {
+  cursor: progress;
+}
+
+/* 触屏设备：控件放大到 ≥40px，便于点按（WCAG 2.5.8） */
+@media (pointer: coarse) {
+  button,
+  select,
+  input:not([type='checkbox'], [type='radio']) {
+    min-height: 40px;
+  }
 }
 
 /* 前庭功能障碍 / 系统降低动效偏好：一刀切关掉所有过渡与动画 */

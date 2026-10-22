@@ -126,9 +126,9 @@ async function onChangePassword() {
       </label>
       <label class="container_login_auth_form_password">
         密码
-        <input ref="passwordEl" v-model="password" type="password" autocomplete="current-password" placeholder="请输入访问密钥" required>
+        <input ref="passwordEl" v-model="password" type="password" autocomplete="current-password" placeholder="请输入密码" required>
       </label>
-      <p v-if="errorMessage" class="container_login_auth_form_error" data-state="error">
+      <p v-if="errorMessage" class="container_login_auth_form_error" data-state="error" role="alert">
         {{ errorMessage }}
       </p>
       <p v-if="noticeMessage" class="container_login_auth_form_notice">{{ noticeMessage }}</p>
@@ -158,7 +158,7 @@ async function onChangePassword() {
         确认新密码
         <input ref="confirmPasswordEl" v-model="confirmPassword" type="password" autocomplete="new-password" placeholder="再次输入新密码" required>
       </label>
-      <p v-if="errorMessage" class="container_login_auth_form_error" data-state="error">
+      <p v-if="errorMessage" class="container_login_auth_form_error" data-state="error" role="alert">
         {{ errorMessage }}
       </p>
       <p v-if="noticeMessage" class="container_login_auth_form_notice">{{ noticeMessage }}</p>

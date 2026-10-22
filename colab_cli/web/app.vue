@@ -61,57 +61,67 @@ const navItems = computed(() => {
 
 <template>
   <div>
+    <a v-if="showNav" class="container_dash_list_header_skip" href="#main-content">跳到主要内容</a>
     <header v-if="showNav" class="container_dash_list_header_nav">
-      <div class="container_dash_list_header_brand">
+      <NuxtLink class="container_dash_list_header_brand" to="/" aria-label="Colab 控制台首页">
         <span class="container_dash_list_header_logo" aria-hidden="true">◆</span>
         <span class="container_dash_list_header_title">COLAB 控制台</span>
-      </div>
-      <NuxtLink
-        v-for="item in navItems"
-        :key="item.to"
-        class="container_dash_list_header_link"
-        active-class="container_dash_list_header_current"
-        :to="item.to"
-      >
-        {{ item.label }}
       </NuxtLink>
-      <div class="container_dash_list_header_status">
-        <span class="container_dash_list_header_dot" aria-hidden="true" />
-        <span class="container_dash_list_header_state">系统在线</span>
+      <nav class="container_dash_list_header_menu" aria-label="主导航">
+        <NuxtLink
+          v-for="item in navItems"
+          :key="item.to"
+          class="container_dash_list_header_link"
+          active-class="container_dash_list_header_current"
+          :to="item.to"
+        >
+          {{ item.label }}
+        </NuxtLink>
+      </nav>
+      <div class="container_dash_list_header_actions">
+        <div class="container_dash_list_header_status" title="控制台服务可访问">
+          <span class="container_dash_list_header_dot" aria-hidden="true" />
+          <span class="container_dash_list_header_state">系统在线</span>
+        </div>
+        <button
+          class="container_dash_list_header_theme"
+          type="button"
+          :title="uiStore.theme === 'light' ? '切换到夜间模式' : '切换到白天模式'"
+          :aria-label="uiStore.theme === 'light' ? '切换到夜间模式' : '切换到白天模式'"
+          @click="uiStore.toggleTheme()"
+        >
+          <span aria-hidden="true">{{ uiStore.theme === 'light' ? '☀️' : '🌙' }}</span>
+          <span class="container_dash_list_header_themetext">{{ uiStore.theme === 'light' ? '白天' : '夜间' }}</span>
+        </button>
+        <span class="container_dash_list_header_user" :title="`当前用户：${authStore.user?.username ?? ''}`">
+          <span class="container_dash_list_header_avatar" aria-hidden="true">
+            {{ (authStore.user?.username ?? '?').slice(0, 1).toUpperCase() }}
+          </span>
+          <span class="container_dash_list_header_username">{{ authStore.user?.username }}</span>
+        </span>
+        <button
+          class="container_dash_list_header_logout"
+          type="button"
+          @click="authStore.logout()"
+        >
+          退出登录
+        </button>
       </div>
-      <button
-        class="container_dash_list_header_theme"
-        type="button"
-        :title="uiStore.theme === 'light' ? '切换到夜间模式' : '切换到白天模式'"
-        :aria-label="uiStore.theme === 'light' ? '切换到夜间模式' : '切换到白天模式'"
-        @click="uiStore.toggleTheme()"
-      >
-        <span aria-hidden="true">{{ uiStore.theme === 'light' ? '☀️' : '🌙' }}</span>
-        <span>{{ uiStore.theme === 'light' ? '白天' : '夜间' }}</span>
-      </button>
-      <span class="container_dash_list_header_user">
-        {{ authStore.user?.username }}
-      </span>
-      <button
-        class="container_dash_list_header_logout"
-        type="button"
-        @click="authStore.logout()"
-      >
-        退出登录
-      </button>
     </header>
 
     <SessionOrphanBanner v-if="showNav" />
 
-    <NuxtPage
-      :transition="{
-        enterActiveClass: 'container_dash_list_body_entering',
-        enterFromClass: 'container_dash_list_body_enterfrom',
-        leaveActiveClass: 'container_dash_list_body_leaving',
-        leaveToClass: 'container_dash_list_body_leaveto',
-        mode: 'out-in',
-      }"
-    />
+    <div id="main-content" class="container_dash_list_body_main" tabindex="-1">
+      <NuxtPage
+        :transition="{
+          enterActiveClass: 'container_dash_list_body_entering',
+          enterFromClass: 'container_dash_list_body_enterfrom',
+          leaveActiveClass: 'container_dash_list_body_leaving',
+          leaveToClass: 'container_dash_list_body_leaveto',
+          mode: 'out-in',
+        }"
+      />
+    </div>
 
     <!-- TransitionGroup 的过渡类名必须显式指定：Vue 默认生成的 toast-enter-active
          之类不符合 container_页面_功能_位置_别名（doc/04 §1.1），stylelint 会拦。
@@ -131,78 +141,139 @@ const navItems = computed(() => {
         :key="toast.id"
         class="container_dash_list_modal_toast"
         :data-kind="toast.kind"
-        role="status"
-        @click="uiStore.remove(toast.id)"
+        :role="toast.kind === 'error' ? 'alert' : 'status'"
       >
-        {{ toast.text }}
+        <span class="container_dash_list_modal_icon" aria-hidden="true">
+          {{ toast.kind === 'error' ? '✕' : toast.kind === 'warn' ? '!' : 'i' }}
+        </span>
+        <span class="container_dash_list_modal_text">{{ toast.text }}</span>
+        <button
+          class="container_dash_list_modal_close"
+          type="button"
+          aria-label="关闭提示"
+          @click="uiStore.remove(toast.id)"
+        >
+          ×
+        </button>
       </div>
     </TransitionGroup>
   </div>
 </template>
 
 <style>
+.container_dash_list_header_skip {
+  position: absolute;
+  top: var(--sp-2);
+  left: var(--sp-2);
+  z-index: calc(var(--z-toast) + 1);
+  padding: var(--sp-2) var(--sp-4);
+  color: var(--c-text-invert);
+  background: var(--c-brand);
+  border-radius: var(--r-sm);
+  transform: translateY(-200%);
+}
+
+.container_dash_list_header_skip:focus {
+  color: var(--c-text-invert);
+  transform: none;
+}
+
+.container_dash_list_body_main:focus {
+  outline: none;
+}
+
 .container_dash_list_header_nav {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-header);
   display: flex;
-  gap: var(--sp-1);
+  gap: var(--sp-4);
   align-items: center;
+  min-height: var(--h-header);
   padding: 0 var(--sp-6);
-  background: var(--c-surface);
+  background: color-mix(in srgb, var(--c-surface) 88%, transparent);
   border-bottom: 1px solid var(--c-border);
   box-shadow: var(--sh-1);
+  backdrop-filter: saturate(160%) blur(10px);
 }
 
 .container_dash_list_header_brand {
   display: flex;
+  flex: none;
   gap: var(--sp-2);
   align-items: center;
-  margin-right: var(--sp-4);
+  color: var(--c-text);
   user-select: none;
 }
 
+.container_dash_list_header_brand:hover {
+  color: var(--c-text);
+  text-shadow: none;
+}
+
 .container_dash_list_header_logo {
-  font-size: var(--fs-md);
+  font-size: var(--fs-lg);
   color: var(--c-brand);
   text-shadow: var(--c-brand-glow);
 }
 
 .container_dash_list_header_title {
   font-size: var(--fs-sm);
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   letter-spacing: 1px;
-  color: var(--c-text);
   white-space: nowrap;
 }
 
+.container_dash_list_header_menu {
+  display: flex;
+  flex: 1;
+  gap: var(--sp-1);
+  align-self: stretch;
+  min-width: 0;
+}
+
 .container_dash_list_header_link {
-  padding: var(--sp-3) 14px;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--sp-3);
   color: var(--c-text-sub);
+  white-space: nowrap;
   text-decoration: none;
   border-bottom: 2px solid transparent;
   transition:
     color var(--t-fast),
-    border-color var(--t-fast);
+    border-color var(--t-fast),
+    background-color var(--t-fast);
 }
 
 .container_dash_list_header_link:hover {
-  color: var(--c-brand);
+  color: var(--c-text);
+  background: var(--c-surface-hover);
+  text-shadow: none;
 }
 
-.container_dash_list_header_current {
-  font-weight: 600;
+.container_dash_list_header_current,
+.container_dash_list_header_current:hover {
+  font-weight: var(--fw-semibold);
   color: var(--c-brand);
   border-bottom-color: var(--c-brand);
-  text-shadow: var(--c-brand-glow-subtle);
+}
+
+.container_dash_list_header_actions {
+  display: flex;
+  flex: none;
+  gap: var(--sp-2);
+  align-items: center;
 }
 
 .container_dash_list_header_status {
   display: flex;
   gap: 6px;
   align-items: center;
-  margin-left: auto;
   padding: 3px 10px;
   background: var(--c-success-bg-subtle);
   border: 1px solid var(--c-success-border);
-  border-radius: 12px;
+  border-radius: var(--r-pill);
 }
 
 .container_dash_list_header_dot {
@@ -223,31 +294,36 @@ const navItems = computed(() => {
   gap: 6px;
   align-items: center;
   padding: 4px 10px;
-  margin-left: var(--sp-2);
   font-size: var(--fs-xs);
-  color: var(--c-text);
-  background: var(--c-surface-sub);
-  border: 1px solid var(--c-border);
-  border-radius: var(--r-sm);
-  transition:
-    background-color var(--t-fast),
-    border-color var(--t-fast),
-    color var(--t-fast);
 }
 
-.container_dash_list_header_theme:hover {
+.container_dash_list_header_theme:hover:not(:disabled) {
   color: var(--c-brand);
   border-color: var(--c-brand);
 }
 
 .container_dash_list_header_user {
-  margin-left: var(--sp-4);
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
   font-size: var(--fs-sm);
-  color: var(--c-text-weak);
+  color: var(--c-text-sub);
+}
+
+.container_dash_list_header_avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  color: var(--c-brand);
+  background: var(--c-brand-bg);
+  border: 1px solid var(--c-brand-border);
+  border-radius: 50%;
 }
 
 .container_dash_list_header_logout {
-  margin-left: var(--sp-3);
   padding: 4px 10px;
   font-size: var(--fs-xs);
 }
@@ -270,51 +346,65 @@ const navItems = computed(() => {
   transform: translateY(-8px);
 }
 
-/* 窄屏：导航项最多 7 个，做成可横向滑的 tab 条 */
+/* 中屏：收起次要信息 */
+@media (width <= 1100px) {
+  .container_dash_list_header_status,
+  .container_dash_list_header_username {
+    display: none;
+  }
+}
+
+/* 窄屏：品牌 + 操作占第一行，导航变成第二行可横向滑动的 tab 条 */
 @media (width <= 768px) {
   .container_dash_list_header_nav {
-    padding: 0 var(--sp-2);
-    overflow-x: auto;
-    white-space: nowrap;
-    -webkit-overflow-scrolling: touch;
+    flex-wrap: wrap;
+    row-gap: 0;
+    padding: var(--sp-2) var(--sp-3) 0;
   }
 
-  .container_dash_list_header_brand {
+  .container_dash_list_header_actions {
+    margin-left: auto;
+  }
+
+  .container_dash_list_header_themetext {
     display: none;
+  }
+
+  .container_dash_list_header_menu {
+    flex-basis: 100%;
+    order: 3;
+    min-height: 40px;
+    margin: var(--sp-1) calc(var(--sp-3) * -1) 0;
+    padding: 0 var(--sp-2);
+    overflow-x: auto;
+    scrollbar-width: none;
+    border-top: 1px solid var(--c-divider);
+    -webkit-overflow-scrolling: touch;
   }
 
   .container_dash_list_header_link {
     flex: none;
-    padding: var(--sp-3) var(--sp-2);
-  }
-
-  .container_dash_list_header_status,
-  .container_dash_list_header_user {
-    display: none;
-  }
-
-  .container_dash_list_header_theme {
-    flex: none;
-    margin-left: auto;
-    padding: 3px 8px;
+    padding: 0 var(--sp-3);
   }
 }
 
 .container_dash_list_modal_root {
   position: fixed;
-  top: var(--sp-4);
+  top: calc(var(--h-header) + var(--sp-3));
   right: var(--sp-4);
-  z-index: 100;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
-  max-width: 360px;
+  width: min(380px, calc(100vw - var(--sp-8)));
 }
 
 .container_dash_list_modal_toast {
-  padding: 10px var(--sp-4);
-  cursor: pointer;
-  background: var(--c-surface-sub);
+  display: flex;
+  gap: var(--sp-3);
+  align-items: flex-start;
+  padding: 10px var(--sp-3);
+  background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-left-width: 4px;
   border-radius: var(--r-sm);
@@ -323,8 +413,46 @@ const navItems = computed(() => {
   transition: filter var(--t-fast);
 }
 
-.container_dash_list_modal_toast:hover {
-  filter: brightness(1.1);
+.container_dash_list_modal_icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  color: var(--c-text-invert);
+  background: var(--c-brand);
+  border-radius: 50%;
+}
+
+.container_dash_list_modal_toast[data-kind='warn'] .container_dash_list_modal_icon {
+  background: var(--c-warn);
+}
+
+.container_dash_list_modal_toast[data-kind='error'] .container_dash_list_modal_icon {
+  background: var(--c-danger);
+}
+
+.container_dash_list_modal_text {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.container_dash_list_modal_close {
+  flex: none;
+  min-height: 0;
+  padding: 0 6px;
+  font-size: var(--fs-lg);
+  line-height: 1.2;
+  color: var(--c-text-weak);
+  background: transparent;
+  border: none;
+}
+
+.container_dash_list_modal_close:hover:not(:disabled) {
+  color: var(--c-text);
 }
 
 .container_dash_list_modal_toast[data-kind='info'] {

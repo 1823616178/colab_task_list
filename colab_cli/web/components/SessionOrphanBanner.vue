@@ -7,9 +7,12 @@ const count = computed(() => sessionStore.orphans.length)
 
 <template>
   <div v-if="count > 0" class="container_session_reconcile_panel_orphan" role="alert">
+    <span class="container_session_reconcile_panel_icon" aria-hidden="true">!</span>
     <span class="container_session_reconcile_panel_text">
-      ⚠️ 检测到 {{ count }} 个孤儿会话：VM 仍在计费但无人认领
-      （{{ sessionStore.orphans.map(o => o.name).join('、') }}）
+      <strong>检测到 {{ count }} 个孤儿会话：</strong>VM 仍在计费但无人认领
+      <span class="container_session_reconcile_panel_names">
+        （{{ sessionStore.orphans.map(o => o.name).join('、') }}）
+      </span>
     </span>
     <NuxtLink class="container_session_reconcile_panel_action" to="/sessions">
       去处理
@@ -22,32 +25,67 @@ const count = computed(() => sessionStore.orphans.length)
   display: flex;
   gap: var(--sp-3);
   align-items: center;
-  justify-content: center;
+  max-width: var(--w-page);
+  margin: var(--sp-4) auto 0;
   padding: 10px var(--sp-4);
+  color: var(--c-text);
+  background: var(--c-danger-bg);
+  border: 1px solid var(--c-danger);
+  border-left-width: 4px;
+  border-radius: var(--r-md);
+  box-shadow: var(--sh-glow-danger);
+}
+
+.container_session_reconcile_panel_icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  font-weight: var(--fw-bold);
   color: var(--c-text-invert);
   background: var(--c-danger);
-  box-shadow: var(--c-danger-glow);
+  border-radius: 50%;
 }
 
 .container_session_reconcile_panel_text {
+  flex: 1;
   font-size: var(--fs-md);
-  font-weight: 600;
+}
+
+.container_session_reconcile_panel_text strong {
+  color: var(--c-danger);
+}
+
+.container_session_reconcile_panel_names {
+  font-family: var(--ff-mono);
+  font-size: var(--fs-sm);
+  color: var(--c-text-sub);
 }
 
 /* 危险横幅里的处理按钮 */
 .container_session_reconcile_panel_action {
+  flex: none;
   padding: var(--sp-1) 14px;
-  font-weight: 600;
-  color: var(--c-danger);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-invert);
   text-decoration: none;
-  background: var(--c-surface);
+  background: var(--c-danger);
   border: 1px solid var(--c-danger);
   border-radius: var(--r-sm);
-  transition: background-color var(--t-fast), color var(--t-fast);
+  transition: background-color var(--t-fast);
 }
 
 .container_session_reconcile_panel_action:hover {
   color: var(--c-text-invert);
   background: var(--c-danger-hover);
+  text-shadow: none;
+}
+
+@media (width <= 1392px) {
+  .container_session_reconcile_panel_orphan {
+    margin-right: var(--sp-4);
+    margin-left: var(--sp-4);
+  }
 }
 </style>

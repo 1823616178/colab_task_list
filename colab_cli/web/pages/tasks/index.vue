@@ -148,22 +148,22 @@ onMounted(refresh)
             class="container_task_list_row_item"
             :data-status="task.status"
           >
-            <td class="container_task_list_cell_id">
+            <td class="container_task_list_cell_id" data-label="任务 ID">
               <NuxtLink :to="`/tasks/${task.id}`">{{ task.id }}</NuxtLink>
             </td>
-            <td class="container_task_list_cell_workflow">{{ task.workflowName }}</td>
-            <td class="container_task_list_cell_status">
+            <td class="container_task_list_cell_workflow" data-label="工作流">{{ task.workflowName }}</td>
+            <td class="container_task_list_cell_status" data-label="状态">
               <span class="container_task_list_cell_badge" :data-status="task.status">
                 {{ statusLabel(task.status) }}
               </span>
             </td>
-            <td class="container_task_list_cell_session">{{ task.sessionName }}</td>
-            <td class="container_task_list_cell_gpu">
+            <td class="container_task_list_cell_session" data-label="会话">{{ task.sessionName }}</td>
+            <td class="container_task_list_cell_gpu" data-label="加速器">
               {{ task.acceleratorKind.toUpperCase() }} {{ task.acceleratorSpec }}
             </td>
-            <td class="container_task_list_cell_time">{{ formatLocalTime(task.queuedAt) }}</td>
-            <td class="container_task_list_cell_duration">{{ formatDurationMs(task.durationMs) }}</td>
-            <td class="container_task_list_cell_action">
+            <td class="container_task_list_cell_time" data-label="提交时间">{{ formatLocalTime(task.queuedAt) }}</td>
+            <td class="container_task_list_cell_duration" data-label="耗时">{{ formatDurationMs(task.durationMs) }}</td>
+            <td class="container_task_list_cell_action" data-label="操作">
               <div v-if="!isTerminalStatus(task.status) && isOperator" class="container_task_list_cell_actiongroup">
                 <button
                   class="container_task_list_cell_cancel"
@@ -369,5 +369,70 @@ onMounted(refresh)
 
 .container_task_list_footer_pageinfo {
   color: var(--c-text-sub);
+}
+
+.container_task_list_cell_badge[data-status='queued'],
+.container_task_list_cell_badge[data-status='canceled'] {
+  color: var(--c-text-sub);
+  background: var(--c-surface-sub);
+  border: 1px solid var(--c-border);
+}
+
+/* 窄屏：表格改为卡片，每个单元格用 data-label 作为字段名 */
+@media (width <= 768px) {
+  .container_task_list_toolbar_root {
+    flex-wrap: wrap;
+  }
+
+  .container_task_list_body_table {
+    min-width: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+  }
+
+  .container_task_list_body_table thead {
+    display: none;
+  }
+
+  .container_task_list_body_table tbody,
+  .container_task_list_body_table tr {
+    display: block;
+  }
+
+  .container_task_list_row_item {
+    margin-bottom: var(--sp-3);
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-radius: var(--r-md);
+    box-shadow: var(--sh-1);
+  }
+
+  .container_task_list_row_item td {
+    display: flex;
+    gap: var(--sp-3);
+    justify-content: space-between;
+    padding: 6px 0;
+    text-align: right;
+    border-bottom: 1px dashed var(--c-divider);
+  }
+
+  .container_task_list_row_item td:last-child {
+    border-bottom: none;
+  }
+
+  .container_task_list_row_item td[data-label]::before {
+    flex: none;
+    font-size: var(--fs-xs);
+    color: var(--c-text-weak);
+    text-align: left;
+    content: attr(data-label);
+  }
+
+  .container_task_list_cell_actiongroup {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
 }
 </style>
