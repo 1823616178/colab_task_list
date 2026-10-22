@@ -6,13 +6,14 @@
 改任务只需要改下面三个常量(SPEC / TESTS / MODULE_NAME), 然后重新 push。
 """
 
-import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 import kaggle_benchmarks as kbench
+
+from _workspace_tools import *  # kcloud build 时内联
 
 # ---- 要模型写什么 ----------------------------------------------------------
 
@@ -75,9 +76,6 @@ def test_does_not_mutate_input():
 # 测试失败后允许模型修复几轮; 0 表示一次成型。
 MAX_REPAIR_ROUNDS = 2
 
-# 云端 notebook 的产物目录; 本地跑时退回到当前目录。
-OUTPUT_DIRECTORY = Path("/kaggle/working") if Path("/kaggle/working").is_dir() else Path.cwd()
-
 CODE_BLOCK_PATTERN = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
 
 
@@ -91,12 +89,9 @@ def extract_code(response: str) -> str:
 
 def run_tests(work_directory: Path) -> subprocess.CompletedProcess:
     """在工作目录里跑 pytest, 返回结果供断言使用。"""
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", f"test_{MODULE_NAME}.py"],
+    return run_command(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"test_{MODULE_NAME}.py"],
         cwd=work_directory,
-        capture_output=True,
-        text=True,
-        timeout=300,
     )
 
 
@@ -108,13 +103,13 @@ def cloud_codegen(llm) -> bool:
     """模型写代码, 跑测试, 失败则带着报错让它修, 断言取最终测试结果。"""
     work_directory = OUTPUT_DIRECTORY
     work_directory.mkdir(parents=True, exist_ok=True)
-    (work_directory / f"test_{MODULE_NAME}.py").write_text(TESTS)
+    (work_directory / f"test_{MODULE_NAME}.py").write_text(TESTS, encoding="utf-8")
 
     module_path = work_directory / f"{MODULE_NAME}.py"
     response = llm.prompt(
         f"{SPEC}\n模块文件名是 {MODULE_NAME}.py。只输出代码, 不要解释。"
     )
-    module_path.write_text(extract_code(response))
+    module_path.write_text(extract_code(response), encoding="utf-8")
 
     result = run_tests(work_directory)
     for attempt in range(MAX_REPAIR_ROUNDS):
@@ -127,14 +122,16 @@ def cloud_codegen(llm) -> bool:
             f"{result.stdout[-4000:]}\n\n"
             "修好它。只输出完整的模块代码, 不要解释。"
         )
-        module_path.write_text(extract_code(response))
+        module_path.write_text(extract_code(response), encoding="utf-8")
         result = run_tests(work_directory)
 
     report_path = work_directory / f"{MODULE_NAME}_pytest.txt"
-    report_path.write_text(f"exit_code={result.returncode}\n\n{result.stdout}\n{result.stderr}")
+    report_path.write_text(
+        f"exit_code={result.returncode}\n\n{result.stdout}\n{result.stderr}", encoding="utf-8"
+    )
 
     print("=== 最终代码 ===", flush=True)
-    print(module_path.read_text(), flush=True)
+    print(module_path.read_text(encoding="utf-8"), flush=True)
     print("=== pytest ===", flush=True)
     print(result.stdout[-3000:], flush=True)
 
@@ -145,5 +142,5 @@ def cloud_codegen(llm) -> bool:
     return result.returncode == 0
 
 
-if os.environ.get("CLOUD_CODEGEN_IMPORT_ONLY") != "1":
+if not import_only():
     cloud_codegen.run(kbench.llm)  # type: ignore[attr-defined]

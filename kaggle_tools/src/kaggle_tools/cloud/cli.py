@@ -5,6 +5,8 @@
 每次 push 都是永久记录。
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -13,13 +15,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-TASK_DIRECTORY = HERE / "tasks"
-RUNS_DIRECTORY = HERE / "runs"
-DEFAULT_MODEL = "anthropic/claude-sonnet-5@default"
+from .. import __version__
+from ..common.config import OPENAI_PATH_SUFFIX, Settings, load_settings
+from ..common.errors import ConfigError, KaggleToolsError
+from ..common.kaggle_cli import current_username, run_kaggle
+from ..common.logging import get_logger, setup_logging
+from .build import SOURCE_DIRECTORY, build_tasks
+
+logger = get_logger(__name__)
+
+TASK_DIRECTORY = SOURCE_DIRECTORY
 CODEGEN_JOB_FILE = "codegen-job.json"
-# kaggle_benchmarks 自己会补 /openapi, 这里要给不带后缀的原始地址。
-OPENAI_PATH_SUFFIX = "/openapi"
+STAGING_MARKER = "dataset-metadata.json"
 
 # 三个任务: repo 是仓库改造，spec/codegen 是固定场景示例。
 TASKS = {
@@ -28,10 +35,21 @@ TASKS = {
     "codegen": ("cloud-codegen", TASK_DIRECTORY / "codegen_task.py"),
 }
 
+# 运行期配置; main() 里按环境变量重新加载。
+SETTINGS: Settings = load_settings(environ={}, env_file=Path(os.devnull))
+RUNS_DIRECTORY = SETTINGS.runs_dir
+
 
 def task_of(args: argparse.Namespace) -> tuple[str, Path]:
-    """取出当前选中的任务 slug 与源文件。"""
+    """取出当前选中任务的 slug 与源文件。"""
     return TASKS[args.task]
+
+
+def built_task(args: argparse.Namespace) -> tuple[str, Path]:
+    """构建单文件任务并返回 (slug, 生成文件)。push 和 local 都跑生成物, 保证一致。"""
+    slug, source = task_of(args)
+    build_tasks(RUNS_DIRECTORY / "tasks")
+    return slug, RUNS_DIRECTORY / "tasks" / source.name
 
 
 def prompt_of(args: argparse.Namespace) -> str | None:
@@ -91,26 +109,37 @@ def job_overrides(args: argparse.Namespace) -> dict:
 
 def build_proxy_environment() -> dict[str, str]:
     """复用 kllm 的凭据管理, 组出本地跑任务所需的环境变量。"""
-    sys.path.insert(0, str(HERE.parent))
-    from kllm.config import load_settings
-    from kllm.credentials import TokenManager
+    from ..kllm.credentials import TokenManager
 
-    credentials = TokenManager(load_settings()).get()
+    credentials = TokenManager(SETTINGS).get()
     base_url = credentials.base_url
     if base_url.endswith(OPENAI_PATH_SUFFIX):
         base_url = base_url[: -len(OPENAI_PATH_SUFFIX)]
     return {
         "MODEL_PROXY_URL": base_url,
         "MODEL_PROXY_API_KEY": credentials.token,
-        "LLM_DEFAULT": os.environ.get("LLM_DEFAULT", DEFAULT_MODEL),
-        "LLM_DEFAULT_EVAL": os.environ.get("LLM_DEFAULT_EVAL", DEFAULT_MODEL),
+        "LLM_DEFAULT": os.environ.get("LLM_DEFAULT", SETTINGS.cloud_default_model),
+        "LLM_DEFAULT_EVAL": os.environ.get("LLM_DEFAULT_EVAL", SETTINGS.cloud_default_model),
     }
 
 
 def kaggle_command(arguments: list[str]) -> int:
-    """执行一条 kaggle 命令并透传输出。"""
+    """执行一条 kaggle 命令并透传输出, 带超时。"""
     print(f"$ kaggle {' '.join(arguments)}", flush=True)
-    return subprocess.run(["kaggle", *arguments]).returncode
+    completed = run_kaggle(arguments, timeout=SETTINGS.kaggle_cli_timeout_seconds)
+    if completed.returncode != 0:
+        logger.error("kaggle %s 退出码 %s", arguments[0], completed.returncode)
+    return completed.returncode
+
+
+def confirm(question: str, assume_yes: bool) -> bool:
+    """交互确认; 非交互环境(无 tty)且没给 -y 时视为拒绝, 避免卡死。"""
+    if assume_yes:
+        return True
+    if not sys.stdin or not sys.stdin.isatty():
+        print(f"{question} -> 非交互环境, 需要 -y 才会继续。", file=sys.stderr)
+        return False
+    return input(f"{question} [y/N] ").strip().lower() == "y"
 
 
 def command_local(args: argparse.Namespace) -> int:
@@ -124,7 +153,7 @@ def command_local(args: argparse.Namespace) -> int:
         print("--prompt/--prompt-file 目前只支持 repo 任务", file=sys.stderr)
         return 1
 
-    _, task_file = task_of(args)
+    _, task_file = built_task(args)
     environment = dict(os.environ)
     environment.update(build_proxy_environment())
     if args.model:
@@ -154,6 +183,14 @@ def command_local(args: argparse.Namespace) -> int:
     ).returncode
 
 
+def command_build(args: argparse.Namespace) -> int:
+    """只生成单文件任务, 便于检查或手动 push。"""
+    output = Path(args.output).resolve()
+    for path in build_tasks(output):
+        print(path)
+    return 0
+
+
 def command_dataset(args: argparse.Namespace) -> int:
     """把仓库打包成 Kaggle 私有数据集, 供云端任务通过 -d 挂载。"""
     try:
@@ -172,19 +209,12 @@ def command_dataset(args: argparse.Namespace) -> int:
             print(
                 "  /kaggle/input/... 是云端运行时的挂载路径, 本机没有这个目录。\n"
                 "  dataset 命令是把【本地】目录上传成数据集; 数据集建好后直接用:\n"
-                "    python run_cloud.py push -d <owner>/<slug>",
+                "    kcloud push -d <owner>/<slug>",
                 file=sys.stderr,
             )
         return 1
 
-    owner = args.owner or subprocess.run(
-        ["kaggle", "config", "view"], capture_output=True, text=True
-    ).stdout
-    if not args.owner:
-        owner = next(
-            (line.split(":", 1)[1].strip() for line in owner.splitlines() if "username:" in line),
-            "",
-        )
+    owner = args.owner or current_username()
     if not owner:
         print("拿不到用户名, 用 --owner 指定。", file=sys.stderr)
         return 1
@@ -198,6 +228,14 @@ def command_dataset(args: argparse.Namespace) -> int:
     ):
         print("--staging 不能与仓库目录重叠", file=sys.stderr)
         return 1
+    if staging.exists() and any(staging.iterdir()):
+        if not (staging / STAGING_MARKER).is_file():
+            print(
+                f"--staging {staging} 已存在且不是 kcloud 生成的目录(缺少 {STAGING_MARKER}), "
+                "为防误删已中止; 请换一个空目录。",
+                file=sys.stderr,
+            )
+            return 1
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
@@ -219,11 +257,13 @@ def command_dataset(args: argparse.Namespace) -> int:
         json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
+    if args.dry_run:
+        print(f"[dry-run] 已在 {staging} 准备好数据集 {owner}/{slug}, 未上传。")
+        return 0
     print(f"⚠ 这会把 {repository} 的内容上传到 Kaggle(私有数据集 {owner}/{slug})。")
-    if not args.yes:
-        if input("确认上传? [y/N] ").strip().lower() != "y":
-            print("已取消。")
-            return 1
+    if not confirm("确认上传?", args.yes):
+        print("已取消。")
+        return 1
 
     action = ["datasets", "version", "-p", str(staging), "-m", args.message] if args.update \
         else ["datasets", "create", "-p", str(staging)]
@@ -231,23 +271,23 @@ def command_dataset(args: argparse.Namespace) -> int:
     action += ["--dir-mode", "zip"]
     exit_code = kaggle_command(action)
     if exit_code == 0:
-        print(f"\n挂载用: python run_cloud.py push -d {owner}/{slug}")
+        print(f"\n挂载用: kcloud push -d {owner}/{slug}")
     return exit_code
 
 
 def command_push(args: argparse.Namespace) -> int:
     """把任务推到 Kaggle。注意: 不可删除, 不可撤销。"""
-    slug, task_file = task_of(args)
+    slug, task_file = built_task(args)
     print(f"⚠ push 会在 Kaggle 上创建永久记录(源码 + backing notebook), 服务端不支持删除。")
     print(f"  任务: {slug}   文件: {task_file.name}")
     if args.dataset:
         print(f"  挂载数据集: {', '.join(args.dataset)}")
-    if not args.yes:
-        if input(f"确认推送? [y/N] ").strip().lower() != "y":
-            print("已取消。")
-            return 1
+    if not confirm("确认推送?", args.yes):
+        print("已取消。")
+        return 1
 
-    arguments = ["b", "t", "push", slug, "-f", str(task_file), "--wait", "600"]
+    arguments = ["b", "t", "push", slug, "-f", str(task_file),
+                 "--wait", str(SETTINGS.cloud_push_wait_seconds)]
     for dataset in args.dataset:
         arguments += ["-d", dataset]
     return kaggle_command(arguments)
@@ -289,7 +329,9 @@ def command_download(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     """构造命令行解析器。"""
-    parser = argparse.ArgumentParser(prog="run_cloud", description="Kaggle 评测任务驱动")
+    parser = argparse.ArgumentParser(prog="kcloud", description="Kaggle 评测任务驱动")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("-v", "--verbose", action="store_true", help="输出 DEBUG 日志")
     parser.add_argument("-t", "--task", choices=sorted(TASKS), default="repo",
                         help="选择任务(默认 repo: 仓库改造)")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -315,6 +357,7 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_parser.add_argument("--update", action="store_true", help="更新已存在的数据集")
     dataset_parser.add_argument("-m", "--message", default="update")
     dataset_parser.add_argument("-y", "--yes", action="store_true")
+    dataset_parser.add_argument("--dry-run", action="store_true", help="只准备 staging, 不上传")
     add_prompt_arguments(dataset_parser)
     add_job_arguments(dataset_parser)
     dataset_parser.set_defaults(handler=command_dataset)
@@ -326,29 +369,53 @@ def build_parser() -> argparse.ArgumentParser:
     push_parser.set_defaults(handler=command_push)
 
     run_parser = subparsers.add_parser("run", help="在云端运行")
-    run_parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
-    run_parser.add_argument("--wait", type=int, default=900)
+    run_parser.add_argument("-m", "--model", default=SETTINGS.cloud_default_model)
+    run_parser.add_argument("--wait", type=int, default=SETTINGS.cloud_run_wait_seconds)
     run_parser.set_defaults(handler=command_run)
 
     status_parser = subparsers.add_parser("status", help="查看状态")
     status_parser.set_defaults(handler=command_status)
 
     log_parser = subparsers.add_parser("log", help="查看云端日志")
-    log_parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
+    log_parser.add_argument("-m", "--model", default=SETTINGS.cloud_default_model)
     log_parser.set_defaults(handler=command_log)
 
     download_parser = subparsers.add_parser("download", help="下载并解压产物")
-    download_parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
+    download_parser.add_argument("-m", "--model", default=SETTINGS.cloud_default_model)
     download_parser.add_argument("-o", "--output", default=str(RUNS_DIRECTORY / "cloud"))
     download_parser.set_defaults(handler=command_download)
+
+    build_parser_ = subparsers.add_parser("build", help="生成可单文件 push 的任务脚本")
+    build_parser_.add_argument("-o", "--output", default=str(RUNS_DIRECTORY / "tasks"))
+    build_parser_.set_defaults(handler=command_build)
 
     return parser
 
 
+def configure(settings: Settings) -> None:
+    """装载运行期配置(影响默认值, 所以要在构造解析器之前调用)。"""
+    global SETTINGS, RUNS_DIRECTORY
+    SETTINGS = settings
+    RUNS_DIRECTORY = settings.runs_dir
+
+
 def main(argv: list[str] | None = None) -> int:
-    """命令行主入口。"""
+    """命令行主入口: 可预期的错误打印一行提示并返回 1, 不打调用栈。"""
+    try:
+        configure(load_settings())
+    except ConfigError as error:
+        print(f"配置错误: {error}", file=sys.stderr)
+        return 1
     args = build_parser().parse_args(argv)
-    return args.handler(args)
+    setup_logging("DEBUG" if args.verbose else SETTINGS.log_level, SETTINGS.log_file)
+    try:
+        return args.handler(args)
+    except KaggleToolsError as error:
+        print(f"错误: {error}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("已中断。", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

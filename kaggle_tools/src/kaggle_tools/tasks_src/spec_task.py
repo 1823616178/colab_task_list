@@ -6,7 +6,6 @@
 ⚠ 必须单文件自包含: kaggle b t push 只推这一个 .py 并转成 notebook。
 """
 
-import difflib
 import os
 import shutil
 import subprocess
@@ -16,6 +15,8 @@ from pathlib import Path
 import kaggle_benchmarks as kbench
 from kaggle_benchmarks.tools.base import ToolInvocationLimitExhausted
 from kaggle_benchmarks.tools.native import native_tool_agent
+
+from _workspace_tools import *  # kcloud build 时内联
 
 # ==== 配置区 ================================================================
 
@@ -187,26 +188,11 @@ def test_trailing_slash_in_base_url_is_tolerated(server):
     assert recorded[0][1].split("?")[0] == "/api/usage"
 '''
 
-VERIFY_TIMEOUT_SECONDS = 300
 VERIFY_OUTPUT_TAIL = 5_000
 MAX_TOOL_ROUNDS = 20
-MAX_FILE_BYTES = 60_000
 
-# ==== 运行期 ================================================================
-
-OUTPUT_DIRECTORY = Path("/kaggle/working") if Path("/kaggle/working").is_dir() else Path.cwd()
-WORKSPACE = OUTPUT_DIRECTORY / "workspace"
+# 验收测试放在工作区之外, resolve_inside_workspace 保证模型读不到。
 ACCEPTANCE_DIRECTORY = OUTPUT_DIRECTORY / "_acceptance"
-IGNORED_PARTS = {"__pycache__", ".pytest_cache", ".git", ".ruff_cache"}
-
-
-class ProtectedPathError(Exception):
-    """模型试图访问工作区之外的路径。"""
-
-
-def is_tracked(path: Path) -> bool:
-    """判断是不是工作区内容; 缓存和字节码不算。"""
-    return path.is_file() and not set(path.parts) & IGNORED_PARTS and path.suffix != ".pyc"
 
 
 def locate_spec() -> Path:
@@ -218,7 +204,7 @@ def locate_spec() -> Path:
             raise FileNotFoundError(f"SPEC_PATH 指向的文件不存在: {path}")
         return path
 
-    for root in (Path("/kaggle/input"), Path.cwd()):
+    for root in (KAGGLE_INPUT, Path.cwd()):
         if root.is_dir():
             for candidate in sorted(root.rglob(SPEC_FILE_NAME)):
                 if candidate.is_file():
@@ -235,27 +221,16 @@ def prepare_directories() -> None:
         if directory.exists():
             shutil.rmtree(directory)
         directory.mkdir(parents=True)
-    (ACCEPTANCE_DIRECTORY / "test_usage_client.py").write_text(ACCEPTANCE_TESTS)
-
-
-def resolve_inside_workspace(path: str) -> Path:
-    """把模型给的路径解析到工作区内, 拒绝逃逸(验收测试就在工作区外)。"""
-    resolved = (WORKSPACE / path).resolve()
-    if not resolved.is_relative_to(WORKSPACE.resolve()):
-        raise ProtectedPathError(f"路径越界: {path}")
-    return resolved
+    (ACCEPTANCE_DIRECTORY / "test_usage_client.py").write_text(ACCEPTANCE_TESTS, encoding="utf-8")
 
 
 def execute_verification() -> subprocess.CompletedProcess:
     """用工作区外的验收测试跑 pytest, 把工作区放进 PYTHONPATH。"""
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(WORKSPACE)
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", str(ACCEPTANCE_DIRECTORY)],
+    return run_command(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(ACCEPTANCE_DIRECTORY)],
         cwd=WORKSPACE,
-        capture_output=True,
-        text=True,
-        timeout=VERIFY_TIMEOUT_SECONDS,
         env=environment,
     )
 
@@ -265,46 +240,7 @@ def execute_verification() -> subprocess.CompletedProcess:
 
 def read_spec() -> str:
     """读取契约文档全文, 里面写清了接口的路由、参数和错误响应。"""
-    return locate_spec().read_text()[:MAX_FILE_BYTES]
-
-
-def list_files() -> str:
-    """列出工作区里已有的文件。"""
-    paths = [
-        str(path.relative_to(WORKSPACE))
-        for path in sorted(WORKSPACE.rglob("*"))
-        if is_tracked(path)
-    ]
-    return "\n".join(paths) or "(工作区为空)"
-
-
-def read_file(path: str) -> str:
-    """读取工作区内一个文件的内容。"""
-    try:
-        target = resolve_inside_workspace(path)
-    except ProtectedPathError as error:
-        return f"ERROR: {error}"
-    if not target.is_file():
-        return f"ERROR: 文件不存在: {path}"
-    return target.read_text()[:MAX_FILE_BYTES]
-
-
-def write_file(path: str, content: str) -> str:
-    """把内容整体写入工作区内的一个文件, 覆盖原有内容。"""
-    try:
-        target = resolve_inside_workspace(path)
-    except ProtectedPathError as error:
-        return f"ERROR: {error}"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content)
-    return f"OK: 已写入 {path} ({len(content)} 字符)"
-
-
-def run_verification() -> str:
-    """运行验收测试, 返回退出码和输出。测试源码不可读, 只能看结果。"""
-    result = execute_verification()
-    output = (result.stdout + result.stderr)[-VERIFY_OUTPUT_TAIL:]
-    return f"exit_code={result.returncode}\n\n{output}"
+    return locate_spec().read_text(encoding="utf-8")[:MAX_FILE_BYTES]
 
 
 TOOLS = [read_spec, list_files, read_file, write_file, run_verification]
@@ -316,7 +252,8 @@ TOOLS = [read_spec, list_files, read_file, write_file, run_verification]
 def write_artifacts(result: subprocess.CompletedProcess) -> None:
     """把生成的代码和验收报告留在输出目录, 随 run 产物打包。"""
     (OUTPUT_DIRECTORY / "verification.txt").write_text(
-        f"exit_code={result.returncode}\n\n{result.stdout}\n{result.stderr}"
+        f"exit_code={result.returncode}\n\n{result.stdout}\n{result.stderr}",
+        encoding="utf-8",
     )
     for path in sorted(WORKSPACE.rglob("*")):
         if is_tracked(path):
@@ -348,7 +285,7 @@ def spec_codegen(llm) -> bool:
 
     generated = WORKSPACE / TARGET_MODULE
     print("=== 生成的代码 ===", flush=True)
-    print(generated.read_text() if generated.is_file() else "(没有生成目标文件)", flush=True)
+    print(generated.read_text(encoding="utf-8") if generated.is_file() else "(没有生成目标文件)", flush=True)
     print("=== 最终验收 ===", flush=True)
     print(f"exit_code={result.returncode}", flush=True)
     print(result.stdout[-2500:], flush=True)
@@ -360,5 +297,5 @@ def spec_codegen(llm) -> bool:
     return result.returncode == 0
 
 
-if os.environ.get("CODEGEN_IMPORT_ONLY") != "1":
+if not import_only():
     spec_codegen.run(kbench.llm)  # type: ignore[attr-defined]

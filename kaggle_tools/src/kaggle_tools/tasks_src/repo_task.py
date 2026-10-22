@@ -14,12 +14,15 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
 import kaggle_benchmarks as kbench
 from kaggle_benchmarks.tools.base import ToolInvocationLimitExhausted
 from kaggle_benchmarks.tools.native import native_tool_agent
+
+from _workspace_tools import *  # kcloud build 时内联
 
 # ==== 默认配置 ==============================================================
 
@@ -64,29 +67,6 @@ JOB_ENVIRONMENT_KEYS = {
 }
 
 CODEGEN_JOB_FILE = "codegen-job.json"
-MAX_FILE_BYTES = 60_000
-VERIFY_TIMEOUT_SECONDS = 300
-VERIFY_OUTPUT_TAIL = 4_000
-
-# ==== 运行期状态 ============================================================
-
-OUTPUT_DIRECTORY = Path("/kaggle/working") if Path("/kaggle/working").is_dir() else Path.cwd()
-WORKSPACE = OUTPUT_DIRECTORY / "workspace"
-IGNORED_PARTS = {"__pycache__", ".pytest_cache", ".git", ".ruff_cache", ".mypy_cache"}
-IGNORED_NAMES = shutil.ignore_patterns(*IGNORED_PARTS, "*.pyc")
-
-
-def is_tracked(path: Path) -> bool:
-    """判断是不是仓库内容; 缓存目录和字节码不算, 免得污染 diff 和文件列表。"""
-    return (
-        path.is_file()
-        and not set(path.parts) & IGNORED_PARTS
-        and path.suffix != ".pyc"
-    )
-
-
-class ProtectedPathError(Exception):
-    """模型试图改动受保护的文件。"""
 
 
 def locate_repository() -> Path:
@@ -98,12 +78,12 @@ def locate_repository() -> Path:
             raise FileNotFoundError(f"CODEGEN_REPO_PATH 指向的目录不存在: {path}")
         return path
 
-    kaggle_input = Path("/kaggle/input")
+    kaggle_input = KAGGLE_INPUT
     if kaggle_input.is_dir():
         # Kaggle CLI 的 dataset --dir-mode zip 会把仓库目录上传成同名 ZIP。
         # 解到 /tmp，避免输入副本混进 /kaggle/working 的下载产物。
         for archive in sorted(kaggle_input.rglob(f"{REPO_NAME}.zip")):
-            extracted = Path("/tmp/cloud_codegen_input") / REPO_NAME
+            extracted = Path(tempfile.gettempdir()) / "cloud_codegen_input" / REPO_NAME
             if extracted.exists():
                 shutil.rmtree(extracted)
             extracted.mkdir(parents=True)
@@ -209,7 +189,7 @@ def load_job(kaggle_input: Path | None = None) -> str:
     """
     global REPO_NAME, VERIFY_COMMAND, PROTECTED_PREFIXES, MAX_TOOL_ROUNDS
 
-    job = read_job_file(Path("/kaggle/input") if kaggle_input is None else kaggle_input)
+    job = read_job_file(KAGGLE_INPUT if kaggle_input is None else kaggle_input)
     job.update(read_job_environment())
 
     repo_name = str(job.get("repo_name", "")).strip()
@@ -228,18 +208,6 @@ def load_job(kaggle_input: Path | None = None) -> str:
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt 得是非空字符串")
     return prompt.strip()
-
-
-def read_tree(root: Path) -> dict[str, str]:
-    """把一棵目录里的文本文件读成 {相对路径: 内容}, 跳过缓存和二进制。"""
-    tree: dict[str, str] = {}
-    for path in sorted(root.rglob("*")):
-        if is_tracked(path):
-            try:
-                tree[str(path.relative_to(root))] = path.read_text()
-            except UnicodeDecodeError:
-                continue
-    return tree
 
 
 def prepare_workspace(repository: Path, resume: bool = False) -> dict[str, str]:
@@ -264,68 +232,9 @@ def prepare_workspace(repository: Path, resume: bool = False) -> dict[str, str]:
     return read_tree(repository)
 
 
-def resolve_inside_workspace(path: str, for_writing: bool) -> Path:
-    """把模型给的相对路径解析到工作目录内, 拒绝逃逸和受保护路径。"""
-    resolved = (WORKSPACE / path).resolve()
-    if not resolved.is_relative_to(WORKSPACE.resolve()):
-        raise ProtectedPathError(f"路径越界: {path}")
-    relative = str(resolved.relative_to(WORKSPACE.resolve()))
-    if for_writing and relative.startswith(PROTECTED_PREFIXES):
-        raise ProtectedPathError(f"{relative} 是受保护文件, 不允许修改")
-    return resolved
-
-
 def execute_verification() -> subprocess.CompletedProcess:
     """在工作目录执行验收命令。"""
-    return subprocess.run(
-        VERIFY_COMMAND,
-        cwd=WORKSPACE,
-        capture_output=True,
-        text=True,
-        timeout=VERIFY_TIMEOUT_SECONDS,
-    )
-
-
-# ==== 暴露给模型的工具 ======================================================
-
-
-def list_files() -> str:
-    """列出仓库里所有文件的相对路径。"""
-    paths = [
-        str(path.relative_to(WORKSPACE))
-        for path in sorted(WORKSPACE.rglob("*"))
-        if is_tracked(path)
-    ]
-    return "\n".join(paths)
-
-
-def read_file(path: str) -> str:
-    """读取仓库内一个文件的全部内容。path 是相对仓库根的路径。"""
-    try:
-        target = resolve_inside_workspace(path, for_writing=False)
-    except ProtectedPathError as error:
-        return f"ERROR: {error}"
-    if not target.is_file():
-        return f"ERROR: 文件不存在: {path}"
-    return target.read_text()[:MAX_FILE_BYTES]
-
-
-def write_file(path: str, content: str) -> str:
-    """把内容整体写入仓库内的一个文件, 覆盖原有内容。受保护路径不可写。"""
-    try:
-        target = resolve_inside_workspace(path, for_writing=True)
-    except ProtectedPathError as error:
-        return f"ERROR: {error}"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content)
-    return f"OK: 已写入 {path} ({len(content)} 字符)"
-
-
-def run_verification() -> str:
-    """运行仓库的验收命令(测试), 返回退出码和输出, 用来检查改动是否正确。"""
-    result = execute_verification()
-    output = (result.stdout + result.stderr)[-VERIFY_OUTPUT_TAIL:]
-    return f"exit_code={result.returncode}\n\n{output}"
+    return run_command(VERIFY_COMMAND, cwd=WORKSPACE)
 
 
 TOOLS = [list_files, read_file, write_file, run_verification]
@@ -357,10 +266,11 @@ def build_diff(snapshot: dict[str, str]) -> str:
 
 def write_artifacts(diff_text: str, result: subprocess.CompletedProcess) -> None:
     """把 diff 和验收报告写进输出目录, 随 run 产物打包。"""
-    (OUTPUT_DIRECTORY / "changes.diff").write_text(diff_text or "(无改动)\n")
+    (OUTPUT_DIRECTORY / "changes.diff").write_text(diff_text or "(无改动)\n", encoding="utf-8")
     (OUTPUT_DIRECTORY / "verification.txt").write_text(
         f"command={' '.join(VERIFY_COMMAND)}\n"
-        f"exit_code={result.returncode}\n\n{result.stdout}\n{result.stderr}"
+        f"exit_code={result.returncode}\n\n{result.stdout}\n{result.stderr}",
+        encoding="utf-8",
     )
 
 
@@ -416,5 +326,5 @@ def repo_codegen(llm) -> bool:
     return result.returncode == 0
 
 
-if os.environ.get("CODEGEN_IMPORT_ONLY") != "1":
+if not import_only():
     repo_codegen.run(kbench.llm)  # type: ignore[attr-defined]
