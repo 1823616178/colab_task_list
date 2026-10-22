@@ -76,4 +76,4 @@ def test_tools_expose_clean_schemas(task):
         schema = function_to_openai_tool(tool)["function"]
         assert schema["description"], f"{schema['name']} 缺少 docstring"
         names.add(schema["name"])
-    assert names == {"read_spec", "list_files", "read_file", "write_file", "run_verification"}
+    assert names == {"read_spec", "list_files", "read_file", "edit_file", "write_file", "run_verification"}

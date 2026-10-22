@@ -6,6 +6,7 @@
   所以任务文件可以在内联之后重新赋值来定制行为。
 """
 
+import difflib
 import os
 import shutil
 import subprocess
@@ -40,6 +41,29 @@ def import_only() -> bool:
 def is_tracked(path: Path) -> bool:
     """判断是不是工作区内容; 缓存目录和字节码不算, 免得污染 diff 和文件列表。"""
     return path.is_file() and not set(path.parts) & IGNORED_PARTS and path.suffix != ".pyc"
+
+
+def unified_diff(relative: str, before: str | None, after: str | None) -> str:
+    """生成 git apply 能直接应用的 unified diff。
+
+    新增文件用 /dev/null 作旧路径, 删除文件用 /dev/null 作新路径;
+    末行没有换行符时补 "\\ No newline at end of file" 标记。
+    """
+    before_lines = (before or "").splitlines(keepends=True)
+    after_lines = (after or "").splitlines(keepends=True)
+    lines = list(difflib.unified_diff(
+        before_lines,
+        after_lines,
+        fromfile="/dev/null" if before is None else f"a/{relative}",
+        tofile="/dev/null" if after is None else f"b/{relative}",
+    ))
+    output = []
+    for line in lines:
+        if line.endswith("\n"):
+            output.append(line)
+        else:
+            output.append(line + "\n\\ No newline at end of file\n")
+    return "".join(output)
 
 
 def relative_posix(path: Path, root: Path) -> str:
@@ -96,8 +120,21 @@ def list_files() -> str:
     return "\n".join(paths) or "(工作区为空)"
 
 
-def read_file(path: str) -> str:
-    """读取工作区内一个文件的全部内容。path 是相对工作区根的路径。"""
+def truncation_notice(text: str, shown: int) -> str:
+    """截断提示: 告诉模型全文多大、怎么分段读、不能整份覆盖。"""
+    return (
+        f"\n\n[已截断: 文件共 {len(text)} 字符 / {text.count(chr(10)) + 1} 行, 仅显示前 {shown} 字符。"
+        " 用 read_file(path, start_line, end_line) 分段读取, 用 edit_file 局部修改;"
+        " 此文件禁止用 write_file 整份覆盖。]"
+    )
+
+
+def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
+    """读取工作区内一个文件。path 是相对工作区根的路径。
+
+    start_line / end_line 是从 1 开始的闭区间行号, 都为 0 表示读全文;
+    大文件会被截断并附带提示, 此时请分段读取。
+    """
     try:
         target = resolve_inside_workspace(path, for_writing=False)
     except ProtectedPathError as error:
@@ -105,20 +142,75 @@ def read_file(path: str) -> str:
     if not target.is_file():
         return f"ERROR: 文件不存在: {path}"
     try:
-        return target.read_text(encoding="utf-8")[:MAX_FILE_BYTES]
+        text = target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return f"ERROR: {path} 不是 UTF-8 文本文件"
 
+    if start_line or end_line:
+        lines = text.splitlines(keepends=True)
+        start = max(1, start_line or 1)
+        end = min(len(lines), end_line or len(lines))
+        if start > end:
+            return f"ERROR: 行号范围无效: {start_line}-{end_line}(文件共 {len(lines)} 行)"
+        chunk = "".join(lines[start - 1:end])
+        header = f"[第 {start}-{end} 行, 共 {len(lines)} 行]\n"
+        if len(chunk) > MAX_FILE_BYTES:
+            return header + chunk[:MAX_FILE_BYTES] + truncation_notice(chunk, MAX_FILE_BYTES)
+        return header + chunk
+
+    if len(text) > MAX_FILE_BYTES:
+        return text[:MAX_FILE_BYTES] + truncation_notice(text, MAX_FILE_BYTES)
+    return text
+
 
 def write_file(path: str, content: str) -> str:
-    """把内容整体写入工作区内的一个文件, 覆盖原有内容。受保护路径不可写。"""
+    """把内容整体写入工作区内的一个文件(新建或覆盖)。受保护路径不可写。
+
+    已存在且超过读取上限的大文件不允许整份覆盖, 请用 edit_file。
+    """
     try:
         target = resolve_inside_workspace(path, for_writing=True)
     except ProtectedPathError as error:
         return f"ERROR: {error}"
+    if target.is_file():
+        try:
+            existing = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            existing = ""
+        if len(existing) > MAX_FILE_BYTES:
+            return (
+                f"ERROR: {path} 有 {len(existing)} 字符, 超过读取上限 {MAX_FILE_BYTES}, "
+                "整份覆盖会丢失你没读到的部分。请用 edit_file 局部修改。"
+            )
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"OK: 已写入 {path} ({len(content)} 字符)"
+
+
+def edit_file(path: str, old_text: str, new_text: str) -> str:
+    """把文件中唯一出现的一段 old_text 替换成 new_text, 用于局部修改(大文件必须用它)。
+
+    old_text 必须与文件内容逐字一致且只出现一次; 想追加内容可以把相邻的已有文本一并作为 old_text。
+    """
+    try:
+        target = resolve_inside_workspace(path, for_writing=True)
+    except ProtectedPathError as error:
+        return f"ERROR: {error}"
+    if not target.is_file():
+        return f"ERROR: 文件不存在: {path}(新文件请用 write_file)"
+    if not old_text:
+        return "ERROR: old_text 不能为空"
+    try:
+        text = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return f"ERROR: {path} 不是 UTF-8 文本文件"
+    count = text.count(old_text)
+    if count == 0:
+        return "ERROR: 没找到 old_text, 请先用 read_file 确认原文(包括缩进和空白)"
+    if count > 1:
+        return f"ERROR: old_text 出现了 {count} 次, 请多带几行上下文使其唯一"
+    target.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
+    return f"OK: 已修改 {path}"
 
 
 def run_verification() -> str:

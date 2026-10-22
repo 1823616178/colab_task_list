@@ -7,7 +7,6 @@
   云端不存在兄弟模块可以 import。动态提示词通过 Dataset 中的 codegen-job.json 传入。
 """
 
-import difflib
 import json
 import os
 import shlex
@@ -236,30 +235,23 @@ def execute_verification() -> subprocess.CompletedProcess:
     return run_command(VERIFY_COMMAND, cwd=WORKSPACE)
 
 
-TOOLS = [list_files, read_file, write_file, run_verification]
+TOOLS = [list_files, read_file, edit_file, write_file, run_verification]
 
 
 # ==== 产物 ==================================================================
 
 
 def build_diff(snapshot: dict[str, str]) -> str:
-    """对比快照与当前工作目录, 生成 unified diff。"""
+    """对比快照与当前工作目录, 生成可 git apply 的 unified diff。"""
     chunks: list[str] = []
     current = read_tree(WORKSPACE)
 
     for relative in sorted(set(snapshot) | set(current)):
-        before = snapshot.get(relative, "")
-        after = current.get(relative, "")
+        before = snapshot.get(relative)
+        after = current.get(relative)
         if before == after:
             continue
-        chunks.extend(
-            difflib.unified_diff(
-                before.splitlines(keepends=True),
-                after.splitlines(keepends=True),
-                fromfile=f"a/{relative}",
-                tofile=f"b/{relative}",
-            )
-        )
+        chunks.append(unified_diff(relative, before, after))
     return "".join(chunks)
 
 

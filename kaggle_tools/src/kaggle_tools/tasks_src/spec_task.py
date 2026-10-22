@@ -242,7 +242,7 @@ def read_spec() -> str:
     return locate_spec().read_text(encoding="utf-8")[:MAX_FILE_BYTES]
 
 
-TOOLS = [read_spec, list_files, read_file, write_file, run_verification]
+TOOLS = [read_spec, list_files, read_file, edit_file, write_file, run_verification]
 
 
 # ==== 任务 ==================================================================
