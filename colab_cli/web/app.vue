@@ -22,6 +22,7 @@ useHead({
 const route = useRoute()
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
+const healthStore = useHealthStore()
 
 const showNav = computed(() => route.path !== '/login' && authStore.isLoggedIn)
 const isOperator = computed(() =>
@@ -31,14 +32,25 @@ const isAdmin = computed(() => authStore.user?.role === 'admin')
 // 会话轮询只在客户端、登录期间运行；登出即停（孤儿横幅数据来自轮询）
 onMounted(() => {
   uiStore.initTheme()
-  if (authStore.isLoggedIn) sessionStore.startPolling()
+  if (authStore.isLoggedIn) {
+    sessionStore.startPolling()
+    healthStore.startPolling()
+  }
 })
 watch(() => authStore.isLoggedIn, (loggedIn) => {
   if (!import.meta.client) return
-  if (loggedIn) sessionStore.startPolling()
-  else sessionStore.stopPolling()
+  if (loggedIn) {
+    sessionStore.startPolling()
+    healthStore.startPolling()
+  } else {
+    sessionStore.stopPolling()
+    healthStore.stopPolling()
+  }
 })
-onBeforeUnmount(() => sessionStore.stopPolling())
+onBeforeUnmount(() => {
+  sessionStore.stopPolling()
+  healthStore.stopPolling()
+})
 
 const navItems = computed(() => {
   const items: { to: string, label: string }[] = [
@@ -79,10 +91,17 @@ const navItems = computed(() => {
         </NuxtLink>
       </nav>
       <div class="container_dash_list_header_actions">
-        <div class="container_dash_list_header_status" title="控制台服务可访问">
+        <button
+          class="container_dash_list_header_status"
+          type="button"
+          :data-health="healthStore.status"
+          :title="healthStore.description"
+          :aria-label="`系统状态：${healthStore.label}。${healthStore.description}`"
+          @click="healthStore.refresh()"
+        >
           <span class="container_dash_list_header_dot" aria-hidden="true" />
-          <span class="container_dash_list_header_state">系统在线</span>
-        </div>
+          <span class="container_dash_list_header_state">系统{{ healthStore.label }}</span>
+        </button>
         <button
           class="container_dash_list_header_theme"
           type="button"
@@ -270,6 +289,7 @@ const navItems = computed(() => {
   display: flex;
   gap: 6px;
   align-items: center;
+  min-height: 0;
   padding: 3px 10px;
   background: var(--c-success-bg-subtle);
   border: 1px solid var(--c-success-border);
@@ -287,6 +307,47 @@ const navItems = computed(() => {
 .container_dash_list_header_state {
   font-size: var(--fs-xs);
   color: var(--c-success);
+}
+
+.container_dash_list_header_status:hover:not(:disabled) {
+  filter: none;
+}
+
+.container_dash_list_header_status[data-health='degraded'] {
+  background: var(--c-warn-bg);
+  border-color: var(--c-warn-border);
+}
+
+.container_dash_list_header_status[data-health='degraded'] .container_dash_list_header_dot {
+  background: var(--c-warn);
+  box-shadow: none;
+}
+
+.container_dash_list_header_status[data-health='degraded'] .container_dash_list_header_state {
+  color: var(--c-warn-text);
+}
+
+.container_dash_list_header_status[data-health='offline'] {
+  background: var(--c-danger-bg);
+  border-color: var(--c-danger);
+}
+
+.container_dash_list_header_status[data-health='offline'] .container_dash_list_header_dot {
+  background: var(--c-danger);
+  box-shadow: none;
+}
+
+.container_dash_list_header_status[data-health='offline'] .container_dash_list_header_state {
+  color: var(--c-danger);
+}
+
+.container_dash_list_header_status[data-health='unknown'] .container_dash_list_header_dot {
+  background: var(--c-text-weak);
+  box-shadow: none;
+}
+
+.container_dash_list_header_status[data-health='unknown'] .container_dash_list_header_state {
+  color: var(--c-text-weak);
 }
 
 .container_dash_list_header_theme {
