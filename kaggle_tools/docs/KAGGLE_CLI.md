@@ -73,7 +73,7 @@ python -m pip install "kaggle==2.2.4"
 kaggle --version
 ```
 
-升级 Kaggle CLI 前，应先核对 `run_cloud.py` 中使用的 `benchmarks tasks download -o`、
+升级 Kaggle CLI 前，应先核对 `kcloud` 中使用的 `benchmarks tasks download -o`、
 Dataset 目录模式和模型名称是否仍兼容。
 
 ### 2.1 `kaggle quota` 不是模型额度
@@ -195,7 +195,7 @@ kaggle auth revoke --reason "rotate credentials"
 kaggle config view
 ```
 
-`run_cloud.py dataset` 在没有传 `--owner` 时，会尝试从这个输出中提取 `username:`。
+`kcloud dataset` 在没有传 `--owner` 时，会尝试从这个输出中提取 `username:`。
 如果使用的 token 模式没有显示用户名，应显式传 `--owner`。
 
 ## 4. Model Proxy 凭据
@@ -250,7 +250,7 @@ source .env
 set +a
 ```
 
-本项目的 `run_cloud.py local` 会通过 `kllm.TokenManager` 自动申请、缓存并注入凭据，通常
+本项目的 `kcloud local` 会通过 `kllm.TokenManager` 自动申请、缓存并注入凭据，通常
 不要求手动 `source .env`。
 
 ### 4.2 `kaggle benchmarks init`
@@ -284,7 +284,7 @@ kaggle b init -y \
   --example-file examples/my_task.py
 ```
 
-本项目已经有 `tasks/repo_task.py`，通常只需要 `auth`，不需要反复执行 `init`。
+本项目已经有 `tasks_src/repo_task.py`，通常只需要 `auth`，不需要反复执行 `init`。
 
 ## 5. 查看可用模型
 
@@ -298,7 +298,7 @@ kaggle benchmarks tasks models
 kaggle b t models
 ```
 
-复制命令输出中的模型 slug，用在 `tasks run -m` 或 `run_cloud.py --model`。不要只依赖
+复制命令输出中的模型 slug，用在 `tasks run -m` 或 `kcloud --model`。不要只依赖
 项目源码中的静态模型列表，因为 Kaggle 服务端模型可能发生变化。
 
 项目锁定的 `kaggle==2.2.4` 没有 `kaggle benchmarks quota` 子命令。Kaggle 官方主分支文档
@@ -333,7 +333,7 @@ kaggle datasets init -p ./dataset_staging
 }
 ```
 
-`run_cloud.py dataset` 会自动生成该文件，不需要单独执行 `datasets init`。
+`kcloud dataset` 会自动生成该文件，不需要单独执行 `datasets init`。
 
 ### 6.2 `kaggle datasets create`
 
@@ -388,7 +388,7 @@ kaggle datasets create \
 - `zip`：每个子目录作为同名 `.zip` 文件上传；
 - `tar`：每个子目录作为同名 `.tar` 文件上传。
 
-这就是 `run_cloud.py` 必须传 `--dir-mode zip`，而 `tasks/repo_task.py` 必须在云端解压仓库的原因。
+这就是 `kcloud` 必须传 `--dir-mode zip`，而 `tasks_src/repo_task.py` 必须在云端解压仓库的原因。
 
 ### 6.3 `kaggle datasets version`
 
@@ -933,9 +933,9 @@ kaggle b t download repo-codegen \
   -o ./runs/cloud-result
 ```
 
-## 9. 原生 Kaggle CLI 与 `run_cloud.py` 的差异
+## 9. 原生 Kaggle CLI 与 `kcloud` 的差异
 
-| 能力 | 原生 Kaggle CLI | `run_cloud.py` |
+| 能力 | 原生 Kaggle CLI | `kcloud` |
 |---|---|---|
 | 生成 Dataset 元数据 | 需要 `datasets init` 或手写 | 自动生成 |
 | 仓库打包 | 手动 staging 和 `--dir-mode zip` | 自动复制和 ZIP 上传 |
@@ -948,7 +948,7 @@ kaggle b t download repo-codegen \
 | 强制重下 | 支持 `--force` | 当前未暴露 |
 | 应用代码补丁 | 不支持 | 当前也不自动应用，只生成 diff |
 
-`run_cloud.py` 的 `-p` 是提示词，不是 Kaggle CLI 常见的 `-p/--path`。两者属于不同命令，
+`kcloud` 的 `-p` 是提示词，不是 Kaggle CLI 常见的 `-p/--path`。两者属于不同命令，
 不要混用。
 
 ## 10. 故障排查顺序

@@ -20,12 +20,11 @@ token **1 小时过期**，所以 kllm 的核心工作就两件：自动续期 +
 ## 快速开始
 
 ```bash
-pip install -r requirements.txt          # kaggle / fastapi / uvicorn / httpx
+pip install -e .                         # 在 kaggle_tools/ 下
 kaggle config view                       # 确认已认证（~/.kaggle/access_token 或 kaggle.json）
 
-cd kaggle                                # 必须在本目录下运行，kllm 包在这里
-python -m kllm.cli doctor                # 自检：拿凭据 + 真调一次模型
-python -m kllm.cli serve                 # 起网关，默认 http://127.0.0.1:8799/v1
+kllm doctor                          # 自检：拿凭据 + 真调一次模型
+kllm serve                           # 起网关，默认 http://127.0.0.1:8799/v1
 ```
 
 命令：
@@ -91,22 +90,14 @@ google/gemini-3.1-flash-lite-preview     ibm/granite-4.0-h-small
 1. **staging 域名 + beta 产品**：端点是 `mp-staging.kaggle.net`，模型列表是 CLI 客户端硬编码的
    （不是服务端下发），升级 kaggle CLI 就可能变。
 2. **依赖私有方法**：续期走 `KaggleApi()._fetch_model_proxy_env()`，无稳定性承诺。
-   已做兜底：调不通就回落到 `kaggle benchmarks auth` 子进程。`requirements.txt` 精确 pin `kaggle==2.2.4`。
+   已做兜底：调不通就回落到 `kaggle benchmarks auth` 子进程。`pyproject.toml` + `uv.lock` 精确 pin `kaggle==2.2.4`。
 3. **合规**：这笔额度的设计用途是 Benchmarks 任务评测，当成通用编码后端属于超出预期用法，
    可能被限流或收回额度。
-4. **速率限制未知**，撞上 429 时网关会原样把上游状态码返回给客户端，不做重试。
+4. **速率限制未知**：撞上 429 时网关按 `Retry-After`/指数退避重试 `KLLM_MAX_RETRIES` 次，仍失败才把状态码返回给客户端。
 
 ## 开发
 
-```bash
-cd kaggle
-python -m pytest tests -q        # 28 个测试，全部走 httpx.MockTransport，不碰真实服务
-python tests/probe_proxy.py      # Phase 0 探测脚本，会真实调用（消耗少量额度）
-```
+见 [../README.md](../README.md#开发)。`scripts/probe_proxy.py` 是 Phase 0 探测脚本，会真实调用（消耗少量额度）。
 
-🚨 **`kaggle/` 目录下永远不要放 `__init__.py`**。它和已安装的 `kaggle` 包同名，
-只要保持普通目录，import 系统就会继续沿 sys.path 找到 site-packages 里的真包；
-一旦变成 regular package 就会抢占 `import kaggle`，工具自锁死。
-
-模块职责：`config.py` 配置常量 / `credentials.py` 凭据续期 /
-`server.py` FastAPI 转发 / `usage.py` 账本 / `cli.py` 命令行。
+模块职责：`common/config.py` 配置 / `kllm/credentials.py` 凭据续期 /
+`kllm/server.py` FastAPI 转发（重试、502、request id）/ `kllm/usage.py` 账本 / `kllm/cli.py` 命令行。

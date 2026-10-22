@@ -1,4 +1,6 @@
-# Cloud Codegen 启动手册
+# Cloud Codegen（kcloud）详细手册
+
+> 快速开始与配置见 [../README.md](../README.md)。本文是完整参考。
 
 这个目录用于把一个本地代码仓库作为私有 Kaggle Dataset 上传，让 Kaggle
 Benchmarks 中的模型在云端副本里查看、修改和测试代码，再把改动下载到本地。
@@ -13,7 +15,7 @@ Benchmarks 中的模型在云端副本里查看、修改和测试代码，再把
 模型不会直接修改本地仓库。下载后必须先审查 `changes.diff`，再由你手动应用。
 
 Kaggle 原生命令、参数和组合示例见 [KAGGLE_CLI.md](docs/KAGGLE_CLI.md)。本文后半部分专门
-说明本项目封装脚本 `run_cloud.py` 的全部用法。
+说明本项目封装脚本 `kcloud` 的全部用法。
 
 ## 1. 当前适用范围
 
@@ -34,45 +36,22 @@ Kaggle 原生命令、参数和组合示例见 [KAGGLE_CLI.md](docs/KAGGLE_CLI.m
 
 ### 目录结构
 
-```text
-cloud_codegen/
-├── run_cloud.py                  统一命令入口
-├── requirements.txt             本项目的完整 Python 依赖
-├── tasks/                        可单文件 push 的 Benchmark Task
-│   ├── repo_task.py              仓库修改任务
-│   ├── spec_task.py              API 契约示例任务
-│   └── codegen_task.py           固定代码生成示例任务
-├── examples/
-│   ├── example_repo/             故意带失败测试的示例仓库
-│   ├── prompts/                  可直接使用的提示词示例
-│   └── spec/usage-api.md         spec 任务的示例契约
-├── tests/                        不调用模型的本地回归测试
-├── docs/KAGGLE_CLI.md            Kaggle 原生命令参考
-└── runs/                         本地与云端产物，已被 Git 忽略
-```
+见 [../README.md](../README.md#项目结构)。任务源码在 `src/kaggle_tools/tasks_src/`，
+共享代码 `_workspace_tools.py` 由 `kcloud build` 内联，生成物在 `runs/tasks/`。
 
-`tasks/` 中的文件必须保持单文件自包含，因为 Kaggle push 时只上传选中的任务文件。
+Kaggle push 时只上传选中的任务文件，所以 push 的必须是 `runs/tasks/` 下的单文件生成物（`kcloud push` 自动构建）。
 `runs/`、Dataset staging、`*.task.json` 和 `*.run.json` 都是生成物，不属于源码。
 
 ## 2. 准备环境
 
-建议使用 Python 3.11 或更高版本。在本目录执行：
-
-```bash
-cd /backup/code/kaggle-code/kaggle/cloud_codegen
-
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
+建议使用 Python 3.11 或更高版本。安装方式见 [../README.md](../README.md#安装)，以下命令都在 `kaggle_tools/` 目录、已激活虚拟环境下执行。
 
 确认命令可用：
 
 ```bash
 kaggle --version
-python run_cloud.py --help
-python -m pytest -q tests
+kcloud --help
+pytest
 ```
 
 ### Kaggle 认证
@@ -96,7 +75,7 @@ kaggle b t models
 可选：先验证模型代理凭据和模型调用。这个检查会消耗少量 AI 额度：
 
 ```bash
-PYTHONPATH=.. python -m kllm.cli doctor
+kllm doctor
 ```
 
 ## 3. 先跑通内置示例
@@ -109,7 +88,7 @@ PYTHONPATH=.. python -m kllm.cli doctor
 ### 第一步：本地试跑
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo ./examples/example_repo \
   -p "修复 textstats 包，让全部测试通过；不要修改 tests/" \
   --output ./runs/local-example \
@@ -127,7 +106,7 @@ runs/local-example/workspace/
 短提示词使用 `-p/--prompt`。多行或包含引号的需求建议写进 UTF-8 文件：
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo ./examples/example_repo \
   --prompt-file /absolute/path/to/task.md \
   --output ./runs/local-example \
@@ -135,7 +114,7 @@ python run_cloud.py -t repo local \
 ```
 
 `--prompt` 和 `--prompt-file` 不能同时使用。两者都不传时，任务回退到
-`tasks/repo_task.py` 中的 `SPEC`。
+`src/kaggle_tools/tasks_src/repo_task.py` 中的 `SPEC`。
 
 必须先让本地试跑成功，再进行 push。Benchmark Task 的服务端删除接口目前不可用，
 反复 push 会不断产生永久任务版本。
@@ -146,7 +125,7 @@ python run_cloud.py -t repo local \
 与仓库相同、位于仓库内部或包含仓库的 staging 路径；默认使用 `runs/dataset-staging`。
 
 ```bash
-python run_cloud.py -t repo dataset \
+kcloud -t repo dataset \
   --repo ./examples/example_repo \
   -p "修复 textstats 包，让全部测试通过；不要修改 tests/" \
   --owner YOUR_KAGGLE_USERNAME \
@@ -173,7 +152,7 @@ find /tmp/cloud-codegen-example-dataset -maxdepth 4 -type f -print
 ### 第三步：推送 Benchmark Task
 
 ```bash
-python run_cloud.py -t repo push \
+kcloud -t repo push \
   --dataset YOUR_KAGGLE_USERNAME/cloud-codegen-example
 ```
 
@@ -188,7 +167,7 @@ python run_cloud.py -t repo push \
 ### 第四步：云端运行
 
 ```bash
-python run_cloud.py -t repo run \
+kcloud -t repo run \
   --model anthropic/claude-sonnet-5@default \
   --wait 900
 ```
@@ -198,9 +177,9 @@ python run_cloud.py -t repo run \
 ### 第五步：查看状态和日志
 
 ```bash
-python run_cloud.py -t repo status
+kcloud -t repo status
 
-python run_cloud.py -t repo log \
+kcloud -t repo log \
   --model anthropic/claude-sonnet-5@default
 ```
 
@@ -216,7 +195,7 @@ python run_cloud.py -t repo log \
 每次排查时使用一个新的输出目录，避免把不同 run 的结果混在一起：
 
 ```bash
-python run_cloud.py -t repo download \
+kcloud -t repo download \
   --model anthropic/claude-sonnet-5@default \
   --output ./runs/cloud-example-01
 ```
@@ -250,7 +229,7 @@ workspace/         修改后的完整仓库副本
 
 ### 第一步：确定任务配置
 
-`tasks/repo_task.py` 顶部的 `DEFAULT_*` 只是兜底值，**不需要为每个仓库去改源码**
+`src/kaggle_tools/tasks_src/repo_task.py` 顶部的 `DEFAULT_*` 只是兜底值，**不需要为每个仓库去改源码**
 （云端任务一旦 push 就删不掉，改一次配置就多留一条永久记录）。四项配置都能在运行时
 覆盖，本地走命令行参数，云端走 Dataset 里的 `codegen-job.json`：
 
@@ -280,7 +259,7 @@ workspace/         修改后的完整仓库副本
 ### 第二步：本地试跑真实仓库
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo /absolute/path/my-project \
   --prompt-file /absolute/path/to/task.md \
   --output ./runs/my-project-local-01 \
@@ -309,7 +288,7 @@ python run_cloud.py -t repo local \
 使用独立输出目录比较不同版本：
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo /absolute/path/my-project \
   --prompt-file /absolute/path/prompts/feature-v2.md \
   --output ./runs/my-project-v2
@@ -324,7 +303,7 @@ python run_cloud.py -t repo local \
 首次创建：
 
 ```bash
-python run_cloud.py -t repo dataset \
+kcloud -t repo dataset \
   --repo /absolute/path/my-project \
   --prompt-file /absolute/path/to/task.md \
   --owner YOUR_KAGGLE_USERNAME \
@@ -335,7 +314,7 @@ python run_cloud.py -t repo dataset \
 本地仓库有新版本后，更新同一个 Dataset：
 
 ```bash
-python run_cloud.py -t repo dataset \
+kcloud -t repo dataset \
   --repo /absolute/path/my-project \
   --prompt-file /absolute/path/to/task.md \
   --owner YOUR_KAGGLE_USERNAME \
@@ -350,10 +329,10 @@ python run_cloud.py -t repo dataset \
 任务源码、`SPEC`、验收命令或 Dataset 发生变化后，都重新 push，并再次指定 Dataset：
 
 ```bash
-python run_cloud.py -t repo push \
+kcloud -t repo push \
   --dataset YOUR_KAGGLE_USERNAME/cloud-codegen-my-project
 
-python run_cloud.py -t repo run \
+kcloud -t repo run \
   --model anthropic/claude-sonnet-5@default \
   --wait 900
 ```
@@ -419,7 +398,7 @@ runs/<name>/
 云端 run 的这几样产物在 `/kaggle/working` 下，用 `download` 取回本地：
 
 ```bash
-python run_cloud.py -t repo download -m <model> -o ./runs/cloud-01
+kcloud -t repo download -m <model> -o ./runs/cloud-01
 ```
 
 **重跑会覆盖 `workspace/`。** 不加 `--resume` 时，任务启动第一件事就是删掉旧工作副本
@@ -428,7 +407,7 @@ python run_cloud.py -t repo download -m <model> -o ./runs/cloud-01
 
 ```bash
 # 接着上一轮改，验收命令和轮数照旧要给
-python run_cloud.py -t repo local --repo ./examples/psv_quota \
+kcloud -t repo local --repo ./examples/psv_quota \
   --prompt-file ./next-step.md --output ./runs/psv-quota-local-01 --resume \
   --verify "bash scripts/test.sh" --protected "" --max-rounds 120
 ```
@@ -475,8 +454,8 @@ Kaggle Dataset 默认是私有的，但代码仍然会离开本机并保存在�
 确认虚拟环境已激活，并重新安装依赖：
 
 ```bash
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
+pip install -e .
 ```
 
 ### 本地任务提示缺少模型代理凭据
@@ -485,7 +464,7 @@ python -m pip install -r requirements.txt
 kaggle b auth -y
 ```
 
-然后重新执行 `local`。如果仍失败，运行 `python -m kllm.cli doctor` 查看认证、地区限制
+然后重新执行 `local`。如果仍失败，运行 `kllm doctor` 查看认证、地区限制
 和模型代理响应。
 
 ### 云端提示找不到仓库
@@ -531,14 +510,14 @@ Kaggle CLI 有 delete 命令外壳，但服务端目前不支持删除任务及�
 完成这套流程后，你得到的是可审查的“云端生成补丁”工作流。自动 job ID、冲突检测和
 一键安全应用尚未实现，在这些能力完成前，不要把下载的 `workspace/` 直接覆盖本地仓库。
 
-## 9. `run_cloud.py` 完整命令参考
+## 9. `kcloud` 完整命令参考
 
 ### 9.1 命令结构和参数位置
 
 统一格式：
 
 ```bash
-python run_cloud.py [-t TASK] COMMAND [COMMAND_OPTIONS]
+kcloud [-t TASK] COMMAND [COMMAND_OPTIONS]
 ```
 
 `TASK` 可取 `repo`、`spec`、`codegen`，默认是 `repo`。`COMMAND` 可取 `local`、
@@ -548,34 +527,34 @@ python run_cloud.py [-t TASK] COMMAND [COMMAND_OPTIONS]
 
 ```bash
 # 正确
-python run_cloud.py -t repo local --repo ./examples/example_repo
+kcloud -t repo local --repo ./examples/example_repo
 
 # 也正确：repo 是默认任务
-python run_cloud.py local --repo ./examples/example_repo
+kcloud local --repo ./examples/example_repo
 
 # 错误：local 后面只接受 local 自己的参数
-python run_cloud.py local -t repo --repo ./examples/example_repo
+kcloud local -t repo --repo ./examples/example_repo
 ```
 
 三个任务的映射如下：
 
 | `-t/--task` | Kaggle Task slug | 执行文件 | 用途 |
 |---|---|---|---|
-| `repo` | `repo-codegen` | `tasks/repo_task.py` | 修改一个已有仓库，主要工作流 |
-| `spec` | `spec-codegen` | `tasks/spec_task.py` | 根据 `usage-api.md` 生成客户端，示例任务 |
-| `codegen` | `cloud-codegen` | `tasks/codegen_task.py` | 生成固定区间合并模块，示例任务 |
+| `repo` | `repo-codegen` | `src/kaggle_tools/tasks_src/repo_task.py` | 修改一个已有仓库，主要工作流 |
+| `spec` | `spec-codegen` | `src/kaggle_tools/tasks_src/spec_task.py` | 根据 `usage-api.md` 生成客户端，示例任务 |
+| `codegen` | `cloud-codegen` | `src/kaggle_tools/tasks_src/codegen_task.py` | 生成固定区间合并模块，示例任务 |
 
 不确定参数属于哪一级时直接查看帮助：
 
 ```bash
-python run_cloud.py --help
-python run_cloud.py local --help
-python run_cloud.py dataset --help
-python run_cloud.py push --help
-python run_cloud.py run --help
-python run_cloud.py status --help
-python run_cloud.py log --help
-python run_cloud.py download --help
+kcloud --help
+kcloud local --help
+kcloud dataset --help
+kcloud push --help
+kcloud run --help
+kcloud status --help
+kcloud log --help
+kcloud download --help
 ```
 
 ### 9.2 `local`：本地试跑
@@ -583,7 +562,7 @@ python run_cloud.py download --help
 语法：
 
 ```bash
-python run_cloud.py [-t TASK] local \
+kcloud [-t TASK] local \
   [-m MODEL] [-r REPO] [-s SPEC] [-o OUTPUT] \
   [-p PROMPT | --prompt-file PROMPT_FILE]
 ```
@@ -609,7 +588,7 @@ python run_cloud.py [-t TASK] local \
 `repo` 使用内置提示词：
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo ./examples/example_repo \
   --output ./runs/local-example
 ```
@@ -617,7 +596,7 @@ python run_cloud.py -t repo local \
 `repo` 使用短提示词：
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo ./examples/example_repo \
   -p "修复失败测试，只改实现，不修改 tests 目录" \
   --output ./runs/local-fix
@@ -626,7 +605,7 @@ python run_cloud.py -t repo local \
 `repo` 使用多行提示词文件：
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo /absolute/path/to/my_repo \
   --prompt-file ./examples/prompts/fix-textstats.md \
   --output ./runs/local-my-repo
@@ -635,7 +614,7 @@ python run_cloud.py -t repo local \
 指定模型：
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo ./examples/example_repo \
   --model anthropic/claude-sonnet-5@default \
   --output ./runs/local-sonnet
@@ -644,7 +623,7 @@ python run_cloud.py -t repo local \
 `spec` 任务：
 
 ```bash
-python run_cloud.py -t spec local \
+kcloud -t spec local \
   --spec ./examples/spec/usage-api.md \
   --model anthropic/claude-sonnet-5@default \
   --output ./runs/local-spec
@@ -653,7 +632,7 @@ python run_cloud.py -t spec local \
 `codegen` 固定示例不需要仓库或契约：
 
 ```bash
-python run_cloud.py -t codegen local \
+kcloud -t codegen local \
   --output ./runs/local-codegen
 ```
 
@@ -666,7 +645,7 @@ python run_cloud.py -t codegen local \
 语法：
 
 ```bash
-python run_cloud.py [-t TASK] dataset \
+kcloud [-t TASK] dataset \
   -r REPO [--slug SLUG] [--owner OWNER] [--staging DIRECTORY] \
   [--update] [-m MESSAGE] [-y] \
   [-p PROMPT | --prompt-file PROMPT_FILE]
@@ -696,14 +675,14 @@ python run_cloud.py [-t TASK] dataset \
 首次创建，自动推断 owner 和 slug：
 
 ```bash
-python run_cloud.py -t repo dataset \
+kcloud -t repo dataset \
   --repo ./examples/example_repo
 ```
 
 首次创建，显式指定全部关键参数：
 
 ```bash
-python run_cloud.py -t repo dataset \
+kcloud -t repo dataset \
   --repo /absolute/path/to/my_repo \
   --owner YOUR_KAGGLE_USERNAME \
   --slug my-repo-codegen \
@@ -714,7 +693,7 @@ python run_cloud.py -t repo dataset \
 非交互首次创建：
 
 ```bash
-python run_cloud.py -t repo dataset \
+kcloud -t repo dataset \
   --repo ./examples/example_repo \
   --owner YOUR_KAGGLE_USERNAME \
   --slug cloud-codegen-example \
@@ -725,7 +704,7 @@ python run_cloud.py -t repo dataset \
 更新已有 Dataset，并写版本说明：
 
 ```bash
-python run_cloud.py -t repo dataset \
+kcloud -t repo dataset \
   --repo ./examples/example_repo \
   --owner YOUR_KAGGLE_USERNAME \
   --slug cloud-codegen-example \
@@ -738,7 +717,7 @@ python run_cloud.py -t repo dataset \
 
 - 首次创建不要传 `--update`；同一 `owner/slug` 已存在时改用 `--update`。
 - `--message` 只影响 `--update`，与首次创建组合不会生效。
-- `-p` 和 `--prompt-file` 只能二选一；都不传时云端 `tasks/repo_task.py` 使用内置 `SPEC`。
+- `-p` 和 `--prompt-file` 只能二选一；都不传时云端 `src/kaggle_tools/tasks_src/repo_task.py` 使用内置 `SPEC`。
 - 提示词只由 `repo` 任务读取，所以不要给 `-t spec` 或 `-t codegen` 传提示词参数。
 - `--staging` 是破坏性临时目录，不能指向仓库本身、仓库父目录或存放重要文件的目录。
 - `-y` 只跳过本地确认，不改变 Kaggle 的权限、可见性或上传结果。
@@ -748,7 +727,7 @@ python run_cloud.py -t repo dataset \
 语法：
 
 ```bash
-python run_cloud.py [-t TASK] push [-d OWNER/SLUG ...] [-y]
+kcloud [-t TASK] push [-d OWNER/SLUG ...] [-y]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -762,14 +741,14 @@ python run_cloud.py [-t TASK] push [-d OWNER/SLUG ...] [-y]
 推送 `repo` 任务并挂载一个代码 Dataset：
 
 ```bash
-python run_cloud.py -t repo push \
+kcloud -t repo push \
   --dataset YOUR_KAGGLE_USERNAME/cloud-codegen-example
 ```
 
 挂载多个 Dataset：
 
 ```bash
-python run_cloud.py -t repo push \
+kcloud -t repo push \
   -d YOUR_KAGGLE_USERNAME/cloud-codegen-example \
   -d YOUR_KAGGLE_USERNAME/shared-fixtures
 ```
@@ -777,7 +756,7 @@ python run_cloud.py -t repo push \
 非交互推送：
 
 ```bash
-python run_cloud.py -t repo push \
+kcloud -t repo push \
   -d YOUR_KAGGLE_USERNAME/cloud-codegen-example \
   --yes
 ```
@@ -785,7 +764,7 @@ python run_cloud.py -t repo push \
 无 Dataset 的固定 `codegen` 示例：
 
 ```bash
-python run_cloud.py -t codegen push
+kcloud -t codegen push
 ```
 
 `repo` 不传 `-d` 通常会使云端找不到仓库。再次 push 时仍要重新写出所有需要挂载的
@@ -796,7 +775,7 @@ python run_cloud.py -t codegen push
 语法：
 
 ```bash
-python run_cloud.py [-t TASK] run [-m MODEL] [--wait SECONDS]
+kcloud [-t TASK] run [-m MODEL] [--wait SECONDS]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -807,30 +786,30 @@ python run_cloud.py [-t TASK] run [-m MODEL] [--wait SECONDS]
 默认模型、默认等待 900 秒：
 
 ```bash
-python run_cloud.py -t repo run
+kcloud -t repo run
 ```
 
 指定模型：
 
 ```bash
-python run_cloud.py -t repo run \
+kcloud -t repo run \
   --model anthropic/claude-sonnet-5@default
 ```
 
 提交后立即返回，再用 `status` 查看：
 
 ```bash
-python run_cloud.py -t repo run \
+kcloud -t repo run \
   --model anthropic/claude-sonnet-5@default \
   --wait 0
 
-python run_cloud.py -t repo status
+kcloud -t repo status
 ```
 
 给长任务更长等待时间：
 
 ```bash
-python run_cloud.py -t repo run \
+kcloud -t repo run \
   --model anthropic/claude-sonnet-5@default \
   --wait 1800
 ```
@@ -843,15 +822,15 @@ python run_cloud.py -t repo run \
 语法：
 
 ```bash
-python run_cloud.py [-t TASK] status
+kcloud [-t TASK] status
 ```
 
 这个子命令没有自己的参数，只根据 `-t` 查询对应 slug：
 
 ```bash
-python run_cloud.py -t repo status
-python run_cloud.py -t spec status
-python run_cloud.py -t codegen status
+kcloud -t repo status
+kcloud -t spec status
+kcloud -t codegen status
 ```
 
 不要给 `status` 添加 `--model`；状态输出本身会列出各模型的 run。
@@ -861,7 +840,7 @@ python run_cloud.py -t codegen status
 语法：
 
 ```bash
-python run_cloud.py [-t TASK] log [-m MODEL]
+kcloud [-t TASK] log [-m MODEL]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -870,10 +849,10 @@ python run_cloud.py [-t TASK] log [-m MODEL]
 
 ```bash
 # 默认模型
-python run_cloud.py -t repo log
+kcloud -t repo log
 
 # 显式模型
-python run_cloud.py -t repo log \
+kcloud -t repo log \
   --model anthropic/claude-sonnet-5@default
 ```
 
@@ -885,7 +864,7 @@ python run_cloud.py -t repo log \
 语法：
 
 ```bash
-python run_cloud.py [-t TASK] download [-m MODEL] [-o OUTPUT]
+kcloud [-t TASK] download [-m MODEL] [-o OUTPUT]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -895,10 +874,10 @@ python run_cloud.py [-t TASK] download [-m MODEL] [-o OUTPUT]
 
 ```bash
 # 使用全部默认值
-python run_cloud.py -t repo download
+kcloud -t repo download
 
 # 推荐：模型和本次输出目录都写清楚
-python run_cloud.py -t repo download \
+kcloud -t repo download \
   --model anthropic/claude-sonnet-5@default \
   --output ./runs/cloud-example
 ```
@@ -946,20 +925,20 @@ workspace/
 
 ```bash
 # 失败：全局参数位置错误
-python run_cloud.py local -t repo --repo ./examples/example_repo
+kcloud local -t repo --repo ./examples/example_repo
 
 # 失败：两个提示词来源互斥
-python run_cloud.py -t repo local --repo ./examples/example_repo \
+kcloud -t repo local --repo ./examples/example_repo \
   -p "修复测试" --prompt-file ./examples/prompts/fix-textstats.md
 
 # 失败：提示词目前只支持 repo
-python run_cloud.py -t spec local --spec ./examples/spec/usage-api.md -p "生成客户端"
+kcloud -t spec local --spec ./examples/spec/usage-api.md -p "生成客户端"
 
 # 失败：dataset 的 --repo 是必填参数
-python run_cloud.py -t repo dataset --slug cloud-codegen-example
+kcloud -t repo dataset --slug cloud-codegen-example
 
 # 不起作用：首次 create 不使用版本说明
-python run_cloud.py -t repo dataset --repo ./examples/example_repo \
+kcloud -t repo dataset --repo ./examples/example_repo \
   --message "first version"
 ```
 
@@ -968,7 +947,7 @@ python run_cloud.py -t repo dataset --repo ./examples/example_repo \
 只在本地试跑，不上传代码：
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo ./examples/example_repo \
   --prompt-file ./examples/prompts/fix-textstats.md \
   --output ./runs/local-example
@@ -977,30 +956,30 @@ python run_cloud.py -t repo local \
 首次云端运行：
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo ./examples/example_repo \
   --prompt-file ./examples/prompts/fix-textstats.md \
   --output ./runs/local-example
 
-python run_cloud.py -t repo dataset \
+kcloud -t repo dataset \
   --repo ./examples/example_repo \
   --owner YOUR_KAGGLE_USERNAME \
   --slug cloud-codegen-example \
   --prompt-file ./examples/prompts/fix-textstats.md
 
-python run_cloud.py -t repo push \
+kcloud -t repo push \
   -d YOUR_KAGGLE_USERNAME/cloud-codegen-example
 
-python run_cloud.py -t repo run \
+kcloud -t repo run \
   --model anthropic/claude-sonnet-5@default \
   --wait 900
 
-python run_cloud.py -t repo status
+kcloud -t repo status
 
-python run_cloud.py -t repo log \
+kcloud -t repo log \
   --model anthropic/claude-sonnet-5@default
 
-python run_cloud.py -t repo download \
+kcloud -t repo download \
   --model anthropic/claude-sonnet-5@default \
   --output ./runs/cloud-example
 ```
@@ -1008,12 +987,12 @@ python run_cloud.py -t repo download \
 修改源码或提示词后更新并重跑：
 
 ```bash
-python run_cloud.py -t repo local \
+kcloud -t repo local \
   --repo ./examples/example_repo \
   --prompt-file /absolute/path/to/task-v2.md \
   --output ./runs/local-v2
 
-python run_cloud.py -t repo dataset \
+kcloud -t repo dataset \
   --repo ./examples/example_repo \
   --owner YOUR_KAGGLE_USERNAME \
   --slug cloud-codegen-example \
@@ -1021,23 +1000,23 @@ python run_cloud.py -t repo dataset \
   --update \
   --message "source and prompt v2"
 
-python run_cloud.py -t repo push \
+kcloud -t repo push \
   -d YOUR_KAGGLE_USERNAME/cloud-codegen-example
 
-python run_cloud.py -t repo run --wait 900
+kcloud -t repo run --wait 900
 
-python run_cloud.py -t repo download \
+kcloud -t repo download \
   --output ./runs/cloud-v2
 ```
 
 `dataset` 更新后必须重新 `push`，让新的 task 版本明确挂载目标 Dataset；然后再 `run`。
-`run_cloud.py` 不会把这些阶段自动串起来，也不会自动应用下载的补丁。
+`kcloud` 不会把这些阶段自动串起来，也不会自动应用下载的补丁。
 
 ### 9.11 与 Kaggle 原生命令的对应关系
 
-| `run_cloud.py` | 底层主要命令 |
+| `kcloud` | 底层主要命令 |
 |---|---|
-| `local` | 直接运行 `tasks/repo_task.py`、`tasks/spec_task.py` 或 `tasks/codegen_task.py` |
+| `local` | 直接运行 `src/kaggle_tools/tasks_src/repo_task.py`、`src/kaggle_tools/tasks_src/spec_task.py` 或 `src/kaggle_tools/tasks_src/codegen_task.py` |
 | `dataset` 首次创建 | `kaggle datasets create -p STAGING --dir-mode zip` |
 | `dataset --update` | `kaggle datasets version -p STAGING -m MESSAGE --dir-mode zip` |
 | `push` | `kaggle b t push SLUG -f TASK_FILE --wait 600 [-d DATASET ...]` |
