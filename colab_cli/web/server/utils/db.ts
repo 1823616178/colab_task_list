@@ -24,6 +24,7 @@ import { CreateWorkflowDrafts1725000000010 } from '../migrations/010_CreateWorkf
 import { AddTaskFtpUpload1725000000011 } from '../migrations/011_AddTaskFtpUpload'
 import { AddTaskOutputRetention1725000000012 } from '../migrations/012_AddTaskOutputRetention'
 import { AddTaskBackend1725000000013 } from '../migrations/013_AddTaskBackend'
+import { AddTaskModelMode1725000000014 } from '../migrations/014_AddTaskModelMode'
 
 // globalThis 缓存：dev 热更新时不重复建连
 declare global {
@@ -79,6 +80,7 @@ export function getDataSource(): Promise<DataSource> {
           AddTaskFtpUpload1725000000011,
           AddTaskOutputRetention1725000000012,
           AddTaskBackend1725000000013,
+          AddTaskModelMode1725000000014,
         ],
       })
       await dataSource.initialize()

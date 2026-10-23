@@ -35,8 +35,8 @@ export default defineNitroPlugin(async () => {
   for (const task of inflight) {
     if (runnerAvailable) {
       try {
-        const snapshot = await runnerRequest<{ status: string }>(`/tasks/${task.id}`)
-        if (RUNNER_TERMINAL_STATUSES.has(snapshot.status)) {
+        const snapshot = await runnerRequest<{ status: string, last_seq: number }>(`/tasks/${task.id}`)
+        if (RUNNER_TERMINAL_STATUSES.has(snapshot.status) && snapshot.last_seq === task.lastSeq) {
           const repaired = await finalizeTaskFromStoredTerminalEvent(task.id, task.lastSeq)
           if (repaired) {
             console.warn(

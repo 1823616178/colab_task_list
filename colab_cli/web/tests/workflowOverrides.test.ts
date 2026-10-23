@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   normalizeWorkflowOverrides,
+  normalizeLastFrameOption,
   WorkflowOverrideValidationError,
 } from '../server/services/workflowOverrides.ts'
 import type { EditableWorkflowField } from '../server/entities/WorkflowConfig.ts'
@@ -25,6 +26,18 @@ const FIELDS: EditableWorkflowField[] = [{
     { label: '15 秒', value: '15' },
   ],
 }]
+
+test('可选尾帧默认关闭，并拒绝非布尔值和不支持开关的工作流', () => {
+  assert.equal(normalizeLastFrameOption(undefined, true), false)
+  assert.equal(normalizeLastFrameOption(false, true), false)
+  assert.equal(normalizeLastFrameOption(true, true), true)
+  assert.equal(normalizeLastFrameOption(undefined, false), undefined)
+  for (const raw of ['false', 'true', 0, 1, null, {}, []]) {
+    assert.throws(() => normalizeLastFrameOption(raw, true), WorkflowOverrideValidationError)
+  }
+  assert.throws(() => normalizeLastFrameOption(false, false), /不支持尾帧开关/)
+  assert.throws(() => normalizeLastFrameOption(true, false), /不支持尾帧开关/)
+})
 
 test('工作流覆盖只接受声明字段，并保留空字符串', () => {
   assert.deepEqual(normalizeWorkflowOverrides(undefined, FIELDS), {})

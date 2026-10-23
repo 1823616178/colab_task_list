@@ -22,6 +22,7 @@ import { ensureTaskSubscription } from '../../services/taskSubscription'
 import { writeAudit } from '../../utils/audit'
 import {
   normalizeWorkflowOverrides,
+  normalizeLastFrameOption,
   WorkflowOverrideValidationError,
 } from '../../services/workflowOverrides'
 import { findLiveSessionConflict } from '../../services/sessionReconcileRules'
@@ -36,6 +37,7 @@ import {
 
 const SESSION_NAME_PATTERN = /^[a-zA-Z0-9_.-]{1,128}$/
 const WORKFLOW_SLUG_PATTERN = /^[a-zA-Z0-9_.-]{1,128}$/
+const MODEL_MODES = ['auto', 'download', 'symlink', 'copy'] as const
 
 function runnerOutputDir(): string {
   const config = useRuntimeConfig()
@@ -54,7 +56,7 @@ export default defineEventHandler(async (event) => {
   if (typeof workflowConfig !== 'string' || !workflowConfig) {
     return sendApiError(event, 400, 'BAD_REQUEST', '缺少 workflow_config（如 workflows/minimax_h3.json）')
   }
-  const slug = workflowConfig.replace(/^workflows\//, '').replace(/\.json$/i, '')
+  const slug = workflowConfig.replaceAll('\\', '/').replace(/^workflows\//, '').replace(/\.json$/i, '')
   if (!WORKFLOW_SLUG_PATTERN.test(slug)) {
     return sendApiError(event, 400, 'BAD_REQUEST', `workflow_config 非法: ${workflowConfig}`)
   }
@@ -90,6 +92,13 @@ export default defineEventHandler(async (event) => {
   // 既让 TS 看到 boolean（`unknown ?? true` 会退化成 `{}`，插库时报 TS2322），
   // 也避免「转发 Runner」与「入库」两处各写一遍默认值而漂移。
   const mountDrive = body.mount_drive === undefined ? true : body.mount_drive === true
+  const modelMode = body.model_mode === undefined || body.model_mode === null
+    ? 'auto'
+    : body.model_mode
+  if (typeof modelMode !== 'string' || !(MODEL_MODES as readonly string[]).includes(modelMode)) {
+    return sendApiError(event, 400, 'BAD_REQUEST',
+      `未知模型获取模式: ${String(modelMode)}，可选: ${MODEL_MODES.join(', ')}`)
+  }
   const reuse = body.reuse === true
   const keep = body.keep === true
   const dryRun = body.dry_run === true
@@ -145,8 +154,10 @@ export default defineEventHandler(async (event) => {
       { slug, supported: workflow.supportedAccelerators })
   }
   let workflowOverrides: Record<string, string>
+  let useLastFrame: boolean | undefined
   try {
     const workflowView = await hydrateEditableFieldDefaults(workflow)
+    useLastFrame = normalizeLastFrameOption(body.use_last_frame, workflowView.optionalLastFrame)
     workflowOverrides = normalizeWorkflowOverrides(
       body.workflow_overrides,
       workflowView.editableFields,
@@ -170,10 +181,12 @@ export default defineEventHandler(async (event) => {
         accelerator: { kind, spec },
         backend,
         mount_drive: mountDrive,
+        model_mode: modelMode,
         reuse,
         keep,
         input_dir: body.input_dir ?? null,
         workflow_overrides: workflowOverrides,
+        ...(useLastFrame !== undefined ? { use_last_frame: useLastFrame } : {}),
         timeout,
         ...(dryRun ? { dry_run: true } : {}),
       },
@@ -195,6 +208,7 @@ export default defineEventHandler(async (event) => {
       acceleratorKind: kind,
       acceleratorSpec: spec,
       mountDrive,
+      modelMode: modelMode as typeof MODEL_MODES[number],
       reuse,
       keep,
       timeout,
@@ -229,10 +243,13 @@ export default defineEventHandler(async (event) => {
       session,
       accelerator: { kind, spec },
       backend,
+      mount_drive: mountDrive,
+      model_mode: modelMode,
       reuse,
       keep,
       dry_run: dryRun,
       workflow_override_keys: Object.keys(workflowOverrides),
+      ...(useLastFrame !== undefined ? { use_last_frame: useLastFrame } : {}),
     },
   })
 

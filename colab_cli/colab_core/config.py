@@ -10,6 +10,7 @@ from typing import Optional
 GPU_SPECS = ("T4", "L4", "G4", "H100", "A100")
 TPU_SPECS = ("v5e1", "v6e1")
 ACCELERATOR_KINDS = ("gpu", "tpu")
+MODEL_MODES = ("auto", "download", "symlink", "copy")
 
 # 计算后端：同一套 ComfyUI/MiniMax 工作流可跑在三种云上。
 BACKENDS = ("colab", "kaggle", "modal")
@@ -51,10 +52,12 @@ class TaskConfig:
     accelerator_kind: str = "gpu"
     accelerator_spec: str = "T4"
     mount_drive: bool = True
+    model_mode: str = "auto"
     reuse: bool = False
     keep: bool = False
     input_dir: Optional[Path] = None
     workflow_overrides: dict[str, str] = field(default_factory=dict)
+    use_last_frame: Optional[bool] = None
     timeout: float = 86400.0
     dry_run: bool = False
     task_id: Optional[str] = None
@@ -79,8 +82,15 @@ class TaskConfig:
             for key, value in self.workflow_overrides.items()
         ):
             raise TypeError("workflow_overrides 的键和值必须是字符串")
+        if self.use_last_frame is not None and not isinstance(self.use_last_frame, bool):
+            raise TypeError("use_last_frame 必须是布尔值或省略")
         if self.accelerator_kind not in ACCELERATOR_KINDS:
             raise ValueError(f"未知加速器类型: {self.accelerator_kind!r}")
+        if self.model_mode not in MODEL_MODES:
+            raise ValueError(
+                f"未知模型获取模式: {self.model_mode!r}，"
+                f"可选: {', '.join(MODEL_MODES)}"
+            )
         valid_specs = (
             BACKEND_GPU_SPECS if self.accelerator_kind == "gpu" else BACKEND_TPU_SPECS
         )[self.backend]
@@ -104,12 +114,14 @@ class TaskConfig:
             accelerator_kind=accelerator.get("kind", "gpu"),
             accelerator_spec=accelerator.get("spec", "T4"),
             mount_drive=bool(payload.get("mount_drive", True)),
+            model_mode="auto" if payload.get("model_mode") is None else payload["model_mode"],
             reuse=bool(payload.get("reuse", False)),
             keep=bool(payload.get("keep", False)),
             input_dir=(
                 Path(payload["input_dir"]) if payload.get("input_dir") else None
             ),
             workflow_overrides=payload.get("workflow_overrides") or {},
+            use_last_frame=payload.get("use_last_frame"),
             timeout=float(payload.get("timeout", 86400.0)),
             dry_run=bool(payload.get("dry_run", False)),
             backend=payload.get("backend") or None,

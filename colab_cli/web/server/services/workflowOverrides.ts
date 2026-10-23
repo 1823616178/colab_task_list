@@ -5,6 +5,18 @@ const MAX_OVERRIDE_VALUE_LENGTH = 100_000
 
 export class WorkflowOverrideValidationError extends Error {}
 
+/** Missing values use the workflow's default: optional tail frames are off. */
+export function normalizeLastFrameOption(raw: unknown, optionalLastFrame: boolean): boolean | undefined {
+  if (raw !== undefined && typeof raw !== 'boolean') {
+    throw new WorkflowOverrideValidationError('use_last_frame 必须是布尔值')
+  }
+  if (!optionalLastFrame) {
+    if (raw !== undefined) throw new WorkflowOverrideValidationError('当前工作流不支持尾帧开关')
+    return undefined
+  }
+  return raw ?? false
+}
+
 /** 读取旧草稿时过滤工作流已删除的字段，保证不会把过期字段交回前台。 */
 export function filterWorkflowDraftValues(
   raw: unknown,

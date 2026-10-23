@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { backendLabel } from '~/utils/computeBackends'
 import { extractApiError, useAuthStore } from '~/stores/auth'
-import { isTerminalStatus, TASK_STATUS_LABELS, useTaskStore } from '~/stores/task'
+import { isTerminalStatus, MODEL_MODE_LABELS, TASK_STATUS_LABELS, useTaskStore } from '~/stores/task'
 import type { TaskRetention, TaskRow } from '~/stores/task'
 import { useTaskStreamStore } from '~/stores/taskStream'
 import { useUiStore } from '~/stores/ui'
@@ -25,6 +25,10 @@ const loadError = ref('')
 const actionPending = ref(false)
 const driveConfirmPending = ref(false)
 const driveConfirmSent = ref(false)
+let mounted = false
+let reloadPromise: Promise<void> | null = null
+let pollTimer: ReturnType<typeof setInterval> | null = null
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
 
 const isOperator = computed(() =>
   authStore.user?.role === 'admin' || authStore.user?.role === 'operator')
@@ -34,39 +38,72 @@ const isTerminal = computed(() => (task.value ? isTerminalStatus(task.value.stat
 const connectionLabels: Record<string, string> = {
   idle: '未连接',
   connecting: '连接中…',
-  open: '实时连接已建立',
+  open: '实时通道已连接',
   reconnecting: '连接断开，重连中…',
   closed: '连接已关闭',
 }
 
-async function reloadTask() {
-  try {
-    const detail = await taskStore.fetchTaskDetail(taskId)
-    task.value = detail.task
-    retention.value = detail.retention
-    loadError.value = ''
-  } catch (err) {
-    loadError.value = extractApiError(err, '加载任务失败')
-  }
+function reloadTask(): Promise<void> {
+  if (reloadPromise) return reloadPromise
+  reloadPromise = (async () => {
+    try {
+      const detail = await taskStore.fetchTaskDetail(taskId)
+      if (!mounted) return
+      task.value = detail.task
+      retention.value = detail.retention
+      loadError.value = ''
+      if (streamStore.taskId === taskId && streamStore.terminal && !isTerminalStatus(detail.task.status)) {
+        streamStore.open(taskId, { terminal: false })
+      }
+    } catch (err) {
+      if (mounted) loadError.value = extractApiError(err, '加载任务失败')
+    }
+  })().finally(() => { reloadPromise = null })
+  return reloadPromise
 }
+
+// 里程碑会实时更新阶段，但摘要来自任务接口；合并短时间内的回放事件后再刷新。
+function scheduleTaskRefresh() {
+  if (!mounted || refreshTimer) return
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null
+    void reloadTask()
+  }, 250)
+}
+
+watch(() => [streamStore.phases.at(-1)?.seq, streamStore.phases.at(-1)?.status], scheduleTaskRefresh)
+watch(() => streamStore.connectionState, (state) => {
+  if (state === 'open') scheduleTaskRefresh()
+})
 
 // SSE 终态正常会在数据库收尾后到达；短暂重试兼容旧服务/网络乱序。
 watch(() => streamStore.terminal, async value => {
   if (!value) return
   for (const delayMs of [0, 100, 300, 700]) {
     if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs))
+    if (!mounted) return
     await reloadTask()
     if (task.value && isTerminalStatus(task.value.status)) return
   }
 })
 
 onMounted(async () => {
+  mounted = true
   await reloadTask()
+  if (!mounted) return
   // 终态任务不建长连：服务端回放事件后关闭；日志走 run.log（store 内部处理）
   streamStore.open(taskId, { terminal: task.value ? isTerminalStatus(task.value.status) : false })
+  pollTimer = setInterval(() => {
+    const needsRefresh = !isTerminal.value
+      || (task.value?.status === 'orphaned' && task.value.errorCode === 'SESSION_LOST')
+    if (needsRefresh && document.visibilityState === 'visible') void reloadTask()
+  }, 15_000)
 })
 
 onUnmounted(() => {
+  mounted = false
+  if (pollTimer) clearInterval(pollTimer)
+  if (refreshTimer) clearTimeout(refreshTimer)
   streamStore.close() // doc/04 §3.2：离开必须 close
 })
 
@@ -177,7 +214,8 @@ async function onDownload(kind: 'output' | 'log') {
         工作流：{{ task.workflowName }} ·
         会话：{{ task.sessionName }} ·
         后端：{{ backendLabel(task.backend) }} ·
-        加速器：{{ task.acceleratorKind.toUpperCase() }} {{ task.acceleratorSpec }}
+        加速器：{{ task.acceleratorKind.toUpperCase() }} {{ task.acceleratorSpec }} ·
+        模型：{{ MODEL_MODE_LABELS[task.modelMode] ?? task.modelMode }}
       </p>
       <p class="container_task_detail_summary_row">
         提交：{{ formatLocalTime(task.queuedAt) }} ·
@@ -249,6 +287,39 @@ async function onDownload(kind: 'output' | 'log') {
           {{ driveConfirmSent ? '已确认，等待挂载…' : '我已完成授权，继续挂载' }}
         </button>
       </div>
+    </section>
+
+    <p v-if="!isTerminal && streamStore.errorMessage" class="container_task_detail_monitor_warning" role="status">
+      {{ streamStore.errorMessage }}
+    </p>
+    <p
+      v-if="!isTerminal && task?.currentPhase === 'workflow.exec' && streamStore.metricsStale"
+      class="container_task_detail_monitor_warning"
+      role="status"
+    >
+      超过 90 秒未收到新的资源指标，当前数据显示可能已过期；正在持续核实任务状态。
+    </p>
+    <section v-if="streamStore.progress" class="container_task_detail_card_progress">
+      <h2 class="container_task_detail_progress_title">工作流进度</h2>
+      <p v-if="streamStore.progress.currentNode">当前节点：{{ streamStore.progress.currentNode }}</p>
+      <p v-if="streamStore.progress.totalNodes != null">
+        已完成 {{ streamStore.progress.completedNodes ?? 0 }} / {{ streamStore.progress.totalNodes }} 个节点
+        <template v-if="streamStore.progress.percent != null">（{{ streamStore.progress.percent }}%）</template>
+      </p>
+      <progress
+        v-if="streamStore.progress.percent != null"
+        class="container_task_detail_progress_bar"
+        :value="streamStore.progress.percent"
+        :max="100"
+        aria-label="工作流节点完成比例"
+      />
+      <p v-if="streamStore.progress.steps != null">
+        节点内部进度：{{ streamStore.progress.step ?? 0 }} / {{ streamStore.progress.steps }} 步
+      </p>
+      <p v-if="!streamStore.progress.currentNode && streamStore.progress.totalNodes == null">
+        {{ streamStore.progress.text }}
+      </p>
+      <p>最近进度：{{ formatLocalTime(streamStore.progress.ts) }}</p>
     </section>
 
     <TaskTimeline :phases="streamStore.phases" />
@@ -579,5 +650,32 @@ async function onDownload(kind: 'output' | 'log') {
 .container_task_detail_footer_note {
   margin: 0;
   color: var(--c-text-weak);
+}
+</style>
+
+<style>
+.container_task_detail_card_progress {
+  padding: var(--sp-4);
+  margin-bottom: var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+}
+
+.container_task_detail_progress_title {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-lg);
+}
+
+.container_task_detail_progress_bar {
+  width: 100%;
+  accent-color: var(--c-brand);
+}
+
+.container_task_detail_monitor_warning {
+  padding: var(--sp-3);
+  color: var(--c-warn-text);
+  background: var(--c-warn-bg);
+  border-radius: var(--r-sm);
 }
 </style>

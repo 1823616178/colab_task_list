@@ -23,7 +23,19 @@ Linux / macOS 默认使用 `python3`；也可以用环境变量 `COLAB_PYTHON` �
 当前锁定的 `google-colab-cli==0.6.0` 在原生 Windows 启动命令时会导入 Unix 专用的
 `termios`，报 `ModuleNotFoundError: No module named 'termios'`。
 Runner HTTP 服务能够启动，但 Colab 任务仍需在 WSL/Linux 或 Linux Docker 容器中运行；
-Docker 部署方式见[上级 README](../README.md#docker-一键启动web--runner--mysql)。
+Docker 部署方式见[上级 README](../README.md#docker-一键启动web--runner复用已有-mysql)。
+
+Colab CLI 0.6.0 的内核依赖也需固定为 `jupyter-kernel-client==0.9.0`
+（已写入 `../requirements.txt`）。PyPI 1.0.2 已不再导出 CLI 使用的 `KernelClient`，
+会导致 `drivemount`、`exec` 同时报 AttributeError；详见
+[上游兼容性问题](https://github.com/googlecolab/google-colab-cli/issues/137)。
+Docker 构建会验证执行 API；Runner 运行时发现依赖不兼容会让 `/health` 返回 503，
+避免继续创建 VM 后才失败。直接部署修复后需重启 Runner，Docker 部署需重建 Runner 镜像。
+
+Runner 的原生执行通道与 CLI 共用 `COLAB_CLI_STATE_DIR/<session>.json`（或
+`COLAB_CONFIG`）映射，读取和内核 ID 回写均使用会话自己的 StateStore，避免并发任务
+切换全局配置。若在工作流提交前就确认映射缺失或内核预检失败，新建且未要求保留的
+VM 会自动停止；工作流提交后的异常仍保留 VM，以保护可能已经生成的产物。
 
 **监听地址 `0.0.0.0:54471`**（局域网可访问，不只是本机）。三个入口各读各的：
 
@@ -165,6 +177,54 @@ admin 已 seed（`role=admin`，`mustChangePassword=1`，
 验证结束后：测试用户已删（FK CASCADE 连带其 refresh_tokens），
 admin 密码已改回 seed 初始值，5 条 revoked 的 refresh_tokens 保留作审计。
 
+## 添加 LBH + LightX2V 两阶段工作流
+
+已适配 `workflows/spark_h3_lbh_official_lightx2v_4step_5p2s_i2va.json`：
+原文件保留为 ComfyUI 画布参考；Web / Runner 扫描时会跳过画布 JSON。
+实际运行入口为
+[`workflows/spark_h3_lbh_lightx2v.json`](../workflows/spark_h3_lbh_lightx2v.json)，
+API 图位于
+[`flows/spark_h3_lbh_official_lightx2v_4step_5p2s_i2va.api.json`](../flows/spark_h3_lbh_official_lightx2v_4step_5p2s_i2va.api.json)。
+
+1. 更新并重启 Web / Runner。直接部署时在 `web/` 执行
+   `npm run build`，再重启服务；Docker 部署在 `colab_cli/` 执行
+   `docker compose --env-file web/.env up -d --build`。
+2. 以 admin / operator 登录，进入「提交任务 → 工作流与模型」，点击「从文件同步」。
+3. 返回提交表单，选择「MiniMax H3 LBH + LightX2V 图生视频（4+3 步，兼容版）」。
+4. 在「输入图片」中上传首帧，修改视频 Prompt、时长、随机种子后提交。
+   「启用尾帧」默认关闭；开启后可再上传尾帧或使用已保存的尾帧。
+   关闭时两轮 conditioning 都不使用尾帧，已保存的旧尾帧也不会被带入任务。
+   原画布中的两张图片处于旁路状态，API 适配版已接入两轮 conditioning。
+
+工作流配置通过 `optional_last_frame: true` 声明支持开关，任务请求使用布尔值
+`use_last_frame`；省略或传 `false` 时默认只使用首帧。Runner 在收集素材之前，
+从任务内存副本中移除两处 `last_frame` 连线及不再被使用的尾帧加载节点，
+并将结果写入任务 `api.json` 快照；共享 API 图和原图片不受影响。
+CLI 可通过 `--use-last-frame` 开启，其他未声明该选项的工作流保持原行为。
+
+默认低分辨率画布 608×352（0.2 MP），先采样 4 步；仅视频 latent 经过 LBH
+放大到 1344×768（0.98 MP），音频 latent 原样传递，再采样 3 步，输出带音频的视频。
+24 FPS，默认 124 帧（约 5.2 秒），表单也可选 243 / 362 帧；两轮共用提示词、帧数和种子。
+
+Runner 会安装 [LBH 节点](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler)，
+并下载原图的完整 INT8 主模型、文本编码器、两个 VAE、
+[LightX2V LoRA](https://huggingface.co/Kijai/MiniMax-H3_comfy/tree/main/loras) 和
+[LBH v1 FP16 放大模型](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/tree/main/minimax_h3_latent_upscaler_3d_conv_v1)。
+配置中的六个模型共约 **54.2 GiB**，可复用 Drive / VM 缓存。
+Colab 缺失模型时优先直接下载到已挂载且可写的 Drive，校验后按 `cache_path`
+归档。推理前优先暂存成 VM 本地文件；空间不足时保留 Drive 链接。
+Drive 不可用时，在确认本地下载空间并预留 2 GiB 后回退 VM 下载。
+提交页的“模型获取方式”可选择自动、直接下载、Drive 软链接或 Drive 复制，
+无需为单个工作流增加开关；继续使用“挂载 Google Drive”选项控制持久缓存。
+ComfyUI 需具备原生 MiniMax H3、ResolutionSelector、ComfyMathExpression 等节点
+（原图使用 ComfyUI 0.33.2）；复用旧 VM 前应先更新 ComfyUI。
+权重大小不等于运行显存，具体 GPU 的显存 / 内存是否足够仍需实机验证。
+
+本适配版关闭原图的 `MiniMaxH3SparkAttentionSM120` 和强制 Kitchen Attention，
+使用 ComfyUI 默认注意力后端。[Spark 的 ComfyUI 发行包](https://github.com/zechengtang/Spark-H3/blob/main/comfyui/README.md)
+需要匹配 SM86 / SM89 / SM120、CUDA 和 ComfyUI 版本；当前 Web 的云 GPU 选项不能
+统一套用 SM120 节点。若使用支持 Spark 的设备，需要另行安装匹配包并接回相应架构的节点。
+
 ## P3 任务主链路 API（doc/02 §3.2）
 
 全部需 JWT；写操作限 `admin`/`operator`（`viewer` 403 FORBIDDEN）。
@@ -208,7 +268,7 @@ Nitro→Runner SSE 长连接（`ensureTaskSubscription`，幂等），从受理�
 经 `taskEvents.persistMilestoneEvent` 入库（`(taskId,seq)` 唯一索引去重，INSERT IGNORE）
 ③终态事件回写 tasks 行（status/finishedAt/durationMs/transportMode/outputZipPath/
 sha256/sessionKept/error…；failed/canceled 且 session_kept → `recoverable`）。
-入库处理走每任务一条 promise 链保序；终态标志在链上置位，循环等链落定再决定是否重连。
+每个任务串行处理事件；事件、任务终态与水位在同一事务中提交，成功后才广播并推进续订水位。数据库失败会关闭当前流并重放，旧事件不能覆盖较新的状态。
 
 - 断线重连：流关闭未见终态 → 指数退避（1s→30s）以 `from_seq=<已处理最大 seq>` 续订；
   Runner 侧 events.jsonl 落盘回放补漏。零事件空关流的异常情形不复位退避（防 1s 热循环）。
@@ -216,13 +276,23 @@ sha256/sessionKept/error…；failed/canceled 且 session_kept → `recoverable`
   `from_seq=tasks.lastSeq` 重建订阅，覆盖 Nitro 宕机窗口；Runner 健康检查失败仅告警
   （probe 降级也会告警，doc/01 §5 R1），提交任务时才 503。
 - Runner 已无记录（404 且 events.jsonl 不在）→ 任务标 `orphaned`（RUNNER_LOST）。
+- 每轮对账检查全部在途任务，不依赖 VM 是否活着或上一轮的 `expectedAlive`。明确 404
+  标记 `RUNNER_LOST`，明确 interrupted 标记 `RUNNER_INTERRUPTED`；查询失败保留状态，
+  下一轮继续核实。VM 存活但无人接管时保留计费告警。误标 `SESSION_LOST` 的任务会在
+  对账时核实原任务编号、会话与事件水位，恢复状态并从已入库水位继续补拉。
+- 任务详情在 SSE 建连、阶段变化时刷新摘要；可见页面每 15 秒校准运行状态，
+  误标任务恢复后自动重建浏览器事件流。工作流节点进度单独显示并同步进实时日志。
+- Web→Runner 与浏览器→Web 的 SSE 通道超过 45 秒无响应会重连；资源采样超过 90 秒
+  未更新提示数据过期，心跳不算资源采样更新。
 - `model_cache` 由 `model.prepare` 事件 data 尽力 upsert（含 progress 事件，不入
   task_events 但可对账）；comfyDir/cachePath 事件里没有，取 filename 首段/本身。
 - 事件入库过滤器在 Repository 层断言（`assertStorableEvent`）：拒绝 `status='progress'`
   与 `phase IN ('metrics.sample','log.line')`，不靠调用方自觉。
 
 浏览器侧 `GET /api/tasks/:id/events?from_seq=N`：先挂订阅缓冲实时帧 → 从
-task_events 表回放 seq>N 的里程碑 → 缓冲帧按 seq 去重补发 → 之后实时透传；
+task_events 表回放 seq>N 的里程碑（`event: replay`）→ 缓冲帧按 seq 去重补发 →
+发送最新任务状态（`event: snapshot`）→ 实时透传（`event: task`）。历史失败不会
+关闭重试下载的连接，只有当前终态或最新终态快照才收尾；
 终态事件送达即关闭（与 Runner 语义一致）；任务已终态则回放后立即关闭。
 浏览器断开只摘订阅，不动 Nitro→Runner 长连接。
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { MetricSample } from '~/stores/taskStream'
 
-// 任务详情页 · 资源图表（doc/04 §2.2）：SSE metrics.sample，2 秒一个点。
+// 任务详情页 · 资源图表（doc/04 §2.2）：SSE metrics.sample，按远端实际采样时间展示。
 // 手绘 SVG 折线/面积图（gpu_util 与 vram 占用百分比），不引图表库。
 const props = defineProps<{ samples: MetricSample[] }>()
 
@@ -88,6 +88,7 @@ function shortTime(value: string | null): string {
           {{ shortTime(endTime) }}
         </text>
       </svg>
+      <p v-if="latest">最近采样：{{ formatLocalTime(latest.ts) }}</p>
       <div class="container_task_detail_metrics_legend">
         <span class="container_task_detail_metrics_gpukey">
           GPU 利用率{{ latest ? ` ${latest.gpuUtil.toFixed(0)}%` : '' }}

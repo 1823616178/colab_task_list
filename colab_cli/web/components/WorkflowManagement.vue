@@ -145,7 +145,7 @@ onMounted(async () => {
             <td class="container_workflow_list_cell_synced">{{ formatLocalTime(workflow.syncedAt) }}</td>
             <td v-if="isOperator" class="container_workflow_list_cell_action">
               <NuxtLink
-                v-if="workflow.slug === 'minimax_h3' || workflow.slug === 'minimax_h3_first_frame'"
+                v-if="workflow.inputImages?.some(image => image.label === '首帧' || image.label === '尾帧')"
                 class="container_workflow_list_cell_frames"
                 :to="`/workflows/${workflow.slug}/frames`"
               >

@@ -10,12 +10,13 @@
 // Nitro 重启后的启动补拉见 plugins/03.task-recovery.ts。
 // P4 会话对账（services/sessionReconcile.ts）发现 VM 已消失时经
 // stopTaskSubscription() 结束订阅 —— 同样是生命周期驱动（任务已不可能再推进）。
+import { In } from 'typeorm'
+import { deliverTaskEvent } from './taskEventDelivery'
 import { TaskSchema } from '../entities/Task'
 import { notifyTaskFinished } from './taskNotify'
 import { getDataSource } from '../utils/db'
 import { runnerStream } from './runnerClient'
 import {
-  finalizeTaskFromTerminalEvent,
   isStorableEvent,
   isTerminalEvent,
   persistMilestoneEvent,
@@ -30,8 +31,6 @@ interface Subscription {
   lastSeq: number
   terminal: boolean
   controller: AbortController | null
-  /** 事件处理串行链：保序，终态回写一定在事件入库之后 */
-  chain: Promise<void>
 }
 
 // globalThis 缓存：dev 热更新时订阅表不丢（与 db.ts 同套路）
@@ -82,7 +81,6 @@ export function ensureTaskSubscription(taskId: string, fromSeq?: number): void {
     lastSeq: fromSeq ?? -1,
     terminal: false,
     controller: null,
-    chain: Promise.resolve(),
   }
   subscriptions().set(taskId, sub)
   if (fromSeq === undefined) {
@@ -132,6 +130,13 @@ async function runSubscriptionLoop(sub: Subscription): Promise<void> {
     while (!sub.terminal) {
       sub.controller = new AbortController()
       let sawEvent = false
+      let idleTimer: ReturnType<typeof setTimeout>
+      const touch = () => {
+        clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => sub.controller?.abort(), 45_000)
+        idleTimer.unref?.()
+      }
+      touch()
       try {
         const response = await runnerStream(
           `/tasks/${sub.taskId}/events?from_seq=${sub.lastSeq}`,
@@ -148,20 +153,21 @@ async function runSubscriptionLoop(sub: Subscription): Promise<void> {
           throw new Error(`Runner SSE HTTP ${response.status}`)
         }
         if (!response.body) throw new Error('Runner SSE 响应无 body')
-        await consumeSseStream(response.body, (rawFrame, data) => {
+        await consumeSseStream(response.body, async (rawFrame, data) => {
           if (data === null) {
             broadcast(sub, rawFrame) // `: keepalive` 等注释帧原样透传
             return
           }
           sawEvent = true
-          handleEventFrame(sub, rawFrame, data)
-        })
-        // 等入库/回写串行链落定：终态标志在链里才置位，避免流刚关闭就盲目重连一轮
-        await sub.chain
+          await handleEventFrame(sub, rawFrame, data)
+        }, touch)
       } catch (error) {
         if (sub.terminal) return
         console.warn(`[task-sub] ${sub.taskId} 订阅中断:`, error instanceof Error ? error.message : error)
+      } finally {
+        clearTimeout(idleTimer!)
       }
+      sub.controller.abort()
       if (sub.terminal) return
       // 流被关闭但未见终态（Runner 重启/网络抖动）→ 指数退避重连补拉。
       // 退避只在「这轮真的收到了事件」时复位：Runner 侧 200 但零事件立即关流的
@@ -170,72 +176,45 @@ async function runSubscriptionLoop(sub: Subscription): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, backoffMs))
     }
   } finally {
-    subscriptions().delete(sub.taskId)
+    if (subscriptions().get(sub.taskId) === sub) subscriptions().delete(sub.taskId)
   }
 }
 
-function handleEventFrame(sub: Subscription, rawFrame: string, data: string): void {
-  let event: RunnerTaskEvent
-  try {
-    event = JSON.parse(data) as RunnerTaskEvent
-  } catch {
-    console.warn(`[task-sub] ${sub.taskId} 收到无法解析的事件帧，已忽略`)
-    return
-  }
-  if (typeof event.seq !== 'number' || event.seq <= sub.lastSeq) return // 重放去重
-  sub.lastSeq = event.seq
-  const terminal = isTerminalEvent(event)
-  // 非终态保持低延迟；终态必须等 tasks 行回写完成后广播，避免详情页回查仍是 running。
-  if (!terminal) broadcast(sub, rawFrame)
-
-  // 入库/回写串行链：与广播解耦，失败只告警不打断流
-  sub.chain = sub.chain.then(async () => {
-    try {
-      if (isStorableEvent(event)) {
-        await persistMilestoneEvent(event)
+async function handleEventFrame(sub: Subscription, rawFrame: string, data: string): Promise<void> {
+  if (sub.terminal) return
+  const event = JSON.parse(data) as RunnerTaskEvent
+  await deliverTaskEvent(sub, event, async (event) => {
+    if (isStorableEvent(event)) await persistMilestoneEvent(event)
+    await upsertModelCacheFromEvent(event)
+  }, () => {
+    if (sub.terminal) return
+    broadcast(sub, rawFrame)
+    if (isTerminalEvent(event)) {
+      sub.terminal = true
+      sub.controller?.abort()
+      if (event.phase === 'task.done') {
+        void scheduleTaskFtpUpload(event.task_id).catch(error =>
+          console.warn(`[ftp-upload] ${event.task_id} 入队失败:`, error))
       }
-      await upsertModelCacheFromEvent(event)
-      if (terminal) {
-        await finalizeTaskFromTerminalEvent(event)
-        if (event.phase === 'task.done') {
-          try {
-            await scheduleTaskFtpUpload(event.task_id)
-          } catch (error) {
-            // FTP 是成功产物的异步镜像，配置/入队失败绝不能挡住 succeeded 与下载按钮。
-            console.warn(
-              `[ftp-upload] ${event.task_id} 入队失败:`,
-              error instanceof Error ? error.message : error,
-            )
-          }
-        }
-        void notifyTaskFinished(event.task_id)
-        broadcast(sub, rawFrame)
-        sub.terminal = true
-        sub.controller?.abort() // 终态后主动断开（Runner 也会关流）
-      }
-    } catch (error) {
-      console.error(`[task-sub] ${sub.taskId} 事件 seq=${event.seq} 入库失败:`, error)
+      void notifyTaskFinished(event.task_id)
     }
   })
 }
 
 async function markOrphaned(taskId: string): Promise<void> {
-  try {
-    const ds = await getDataSource()
-    await ds.getRepository(TaskSchema).update(
-      { id: taskId },
-      { status: 'orphaned', finishedAt: new Date(), errorCode: 'RUNNER_LOST', errorMessage: 'Runner 侧已无该任务记录' },
-    )
-    void notifyTaskFinished(taskId)
-  } catch (error) {
-    console.error(`[task-sub] ${taskId} 标记 orphaned 失败:`, error)
-  }
+  const ds = await getDataSource()
+  const result = await ds.getRepository(TaskSchema).update(
+    { id: taskId, status: In(['queued', 'running']) },
+    { status: 'orphaned', finishedAt: new Date(), errorCode: 'RUNNER_LOST', errorMessage: 'Runner 侧已无该任务记录' },
+  )
+  if (result.affected) void notifyTaskFinished(taskId)
 }
 
 /** 逐块解析 SSE 流：完整帧（\n\n 分隔）回调；注释帧 data 为 null。 */
 async function consumeSseStream(
   body: ReadableStream<Uint8Array>,
-  onFrame: (rawFrame: string, data: string | null) => void,
+  onFrame: (rawFrame: string, data: string | null) => Promise<void>,
+  onActivity: () => void,
 ): Promise<void> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
@@ -244,6 +223,7 @@ async function consumeSseStream(
     for (;;) {
       const { done, value } = await reader.read()
       if (done) return
+      onActivity()
       buffer += decoder.decode(value, { stream: true })
       let boundary = buffer.indexOf('\n\n')
       while (boundary >= 0) {
@@ -256,10 +236,11 @@ async function consumeSseStream(
             data = (data ?? '') + (data === null ? '' : '\n') + line.slice(5).replace(/^ /, '')
           }
         }
-        onFrame(block + '\n\n', data)
+        await onFrame(block + '\n\n', data)
       }
     }
   } finally {
+    await reader.cancel().catch(() => {})
     reader.releaseLock()
   }
 }

@@ -147,4 +147,5 @@ def test_slow_subscriber_is_disconnected(event_log, monkeypatch):
     emitter.emit("task.start", "ok", "二")  # 队列已满 → 断开
     emitter.emit("task.done", "ok", "", {"task_id": TASK_ID})  # 不再投递
     assert subscriber.qsize() == 1
+    assert subscriber.get_nowait() is None  # 实际通知生成器关闭，不能只移除注册
     assert event_log._subscribers == []

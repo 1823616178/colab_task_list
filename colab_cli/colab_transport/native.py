@@ -16,7 +16,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from .base import EventSink, Transport, _null_sink
+from .base import EventSink, Transport, WorkflowNotSubmittedError, _null_sink
 from .constants import (
     COLAB_EXEC_MAX_ATTEMPTS,
     OUTPUT_STREAM_PREFIX,
@@ -535,10 +535,11 @@ class NativeTransport(Transport):
     ) -> bool:
         """执行远端工作流，并在任务退出前完成结果交接。"""
         effective_sink = sink if sink is not _null_sink else self._sink
-        from colab_cli.common import state
         from colab_cli.contents import ContentsClient
         from colab_cli.runtime import ColabRuntime
+        from colab_cli.state import StateStore
         from colab_cli.utils import get_status_code
+        from .cli import resolve_config_path
         import requests
         from urllib.parse import quote
 
@@ -570,17 +571,21 @@ class NativeTransport(Transport):
                     return None
                 return response.json()
 
-        session_state = state.store.get(session)
+        # Match the CLI's per-session --config without changing its process-global
+        # state: Runner threads may execute different sessions concurrently.
+        config_path = resolve_config_path(session)
+        store = StateStore(str(config_path) if config_path is not None else None)
+        session_state = store.get(session)
         if session_state is None:
-            raise RuntimeError(f"本地没有会话映射: {session}")
+            raise WorkflowNotSubmittedError(f"本地没有会话映射: {session}")
 
         def on_kernel_started(kernel_id: str) -> None:
             session_state.kernel_id = kernel_id
-            state.store.add(session_state)
+            store.add(session_state)
 
         def on_session_started(session_id: str) -> None:
             session_state.session_id = session_id
-            state.store.add(session_state)
+            store.add(session_state)
 
         def create_runtime() -> ColabRuntime:
             return ColabRuntime(
@@ -612,7 +617,7 @@ class NativeTransport(Transport):
                 ]
                 if preflight_errors:
                     error = preflight_errors[-1]
-                    raise RuntimeError(
+                    raise WorkflowNotSubmittedError(
                         f"远端预检失败: {error.get('ename', 'Error')}: "
                         f"{error.get('evalue', '')}"
                     )
@@ -621,7 +626,7 @@ class NativeTransport(Transport):
                 runtime.stop()
                 runtime = None
                 if attempt >= COLAB_EXEC_MAX_ATTEMPTS:
-                    raise RuntimeError(
+                    raise WorkflowNotSubmittedError(
                         f"连接 Colab 内核失败（已尝试 "
                         f"{COLAB_EXEC_MAX_ATTEMPTS} 次）"
                     ) from error
@@ -632,7 +637,7 @@ class NativeTransport(Transport):
                 )
                 session_state.kernel_id = None
                 session_state.session_id = None
-                state.store.add(session_state)
+                store.add(session_state)
                 time.sleep(2)
 
         receiver = OutputStreamReceiver(
@@ -648,7 +653,7 @@ class NativeTransport(Transport):
                 None,
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             )
-            state.store.add(session_state)
+            store.add(session_state)
             code = script_path.read_text(encoding="utf-8")
             errors = execute_runtime_streaming(
                 runtime,
@@ -681,6 +686,6 @@ class NativeTransport(Transport):
             raise
         finally:
             session_state.running = None
-            state.store.add(session_state)
+            store.add(session_state)
             if runtime is not None:
                 runtime.stop()

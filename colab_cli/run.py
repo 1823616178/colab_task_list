@@ -18,7 +18,7 @@ from colab_core import (
     make_cli_emit,
     run_task,
 )
-from colab_core.config import ALL_GPU_SPECS, BACKENDS, resolve_backend
+from colab_core.config import ALL_GPU_SPECS, BACKENDS, MODEL_MODES, resolve_backend
 from colab_core.paths import HERE, REMOTE_SETUP, REMOTE_WORKFLOW
 from colab_core.sessions import (
     ensure_reusable_session,
@@ -105,11 +105,26 @@ def main():
         help="是否挂载 Google Drive 并复用模型缓存",
     )
     parser.add_argument(
+        "--model-mode",
+        choices=MODEL_MODES,
+        default="auto",
+        help=(
+            "模型获取方式：auto=后端默认；download=直接从 Hugging Face 下载到 VM；"
+            "symlink=复用 Drive 缓存并软链接；copy=复用 Drive 缓存并复制到 VM"
+        ),
+    )
+    parser.add_argument(
         "--reuse",
         action="store_true",
         help="复用已存在的会话，跳过创建 VM 和通用环境安装",
     )
     parser.add_argument("--keep", action="store_true", help="跑完保留 VM")
+    parser.add_argument(
+        "--use-last-frame",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="启用可选尾帧；仅适用于声明 optional_last_frame 的工作流，默认关闭",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -173,9 +188,11 @@ def main():
         accelerator_kind=accelerator_kind,
         accelerator_spec=accelerator_spec,
         mount_drive=args.mount_drive,
+        model_mode=args.model_mode,
         reuse=args.reuse,
         keep=args.keep,
         input_dir=Path(args.input_dir) if args.input_dir else None,
+        use_last_frame=args.use_last_frame,
         timeout=args.timeout,
         dry_run=args.dry_run,
         backend=args.backend,

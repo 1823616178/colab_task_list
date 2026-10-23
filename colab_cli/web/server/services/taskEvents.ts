@@ -4,7 +4,7 @@
 // status='progress' 与 phase IN ('metrics.sample','log.line') ——
 // 这两类只走 SSE/落 run.log，永不入库；别只靠调用方自觉。
 import { In } from 'typeorm'
-import type { QueryDeepPartialEntity } from 'typeorm'
+import type { EntityManager, QueryDeepPartialEntity } from 'typeorm'
 import type { CancelMode, Task, TransportMode } from '../entities/Task'
 import { TaskSchema } from '../entities/Task'
 import type { TaskEventRow } from '../entities/TaskEvent'
@@ -57,41 +57,50 @@ export function isTerminalEvent(event: RunnerTaskEvent): boolean {
 export async function persistMilestoneEvent(event: RunnerTaskEvent): Promise<boolean> {
   assertStorableEvent(event)
   const ds = await getDataSource()
-  const result = await ds
-    .getRepository(TaskEventSchema)
-    .createQueryBuilder()
-    .insert()
-    .values({
-      taskId: event.task_id,
-      seq: event.seq,
-      ts: new Date(event.ts),
-      phase: event.phase,
-      status: event.status as 'start' | 'ok' | 'warn' | 'error',
-      message: event.message ?? '',
-      // json 列：QueryDeepPartialEntity 会把 Record 的索引签名递归展开成
-      // 「每个值都可以是子查询」，与普通对象不兼容，只能在这里断言一次。
-      data: (event.data ?? null) as QueryDeepPartialEntity<TaskEventRow>['data'],
+  return await ds.transaction(async (manager) => {
+    // 与终态回写共用事务；锁住水位，旧回放不能覆盖较新的运行/终态。
+    const task = await manager.getRepository(TaskSchema).findOne({
+      where: { id: event.task_id },
+      lock: { mode: 'pessimistic_write' },
     })
-    .orIgnore()
-    .execute()
-  // mysql2 OkPacket：INSERT IGNORE 插入成功 affectedRows=1，撞唯一索引跳过为 0
-  const inserted = result.raw?.affectedRows === 1
+    if (!task || event.seq <= task.lastSeq) return false
+    const result = await manager
+      .getRepository(TaskEventSchema)
+      .createQueryBuilder()
+      .insert()
+      .values({
+        taskId: event.task_id,
+        seq: event.seq,
+        ts: new Date(event.ts),
+        phase: event.phase,
+        status: event.status as 'start' | 'ok' | 'warn' | 'error',
+        message: event.message ?? '',
+        // json 列：QueryDeepPartialEntity 会把 Record 的索引签名递归展开成
+        // 「每个值都可以是子查询」，与普通对象不兼容，只能在这里断言一次。
+        data: (event.data ?? null) as QueryDeepPartialEntity<TaskEventRow>['data'],
+      })
+      .orIgnore()
+      .execute()
+    // mysql2 OkPacket：INSERT IGNORE 插入成功 affectedRows=1，撞唯一索引跳过为 0
+    const inserted = result.raw?.affectedRows === 1
 
-  const taskUpdates: QueryDeepPartialEntity<Task> = {}
-  if (event.status === 'start') taskUpdates.currentPhase = event.phase
-  if (event.phase === 'task.start') {
-    taskUpdates.status = 'running'
-    taskUpdates.startedAt = new Date(event.ts)
-  }
-  if (Object.keys(taskUpdates).length > 0) {
-    await ds.getRepository(TaskSchema).update({ id: event.task_id }, taskUpdates)
-  }
-  // lastSeq 只增不减（补拉/重连可能乱序到达）
-  await ds.query(
-    'UPDATE `tasks` SET `lastSeq` = GREATEST(`lastSeq`, ?) WHERE `id` = ?',
-    [event.seq, event.task_id],
-  )
-  return inserted
+    const taskUpdates: QueryDeepPartialEntity<Task> = {}
+    if (event.status === 'start') taskUpdates.currentPhase = event.phase
+    if (event.phase === 'task.start') {
+      taskUpdates.status = 'running'
+      taskUpdates.startedAt = new Date(event.ts)
+    }
+    if (Object.keys(taskUpdates).length > 0) {
+      await manager.getRepository(TaskSchema).update({ id: event.task_id }, taskUpdates)
+    }
+    if (isTerminalEvent(event)) await finalizeTaskFromTerminalEvent(event, manager)
+    // lastSeq 只增不减（补拉/重连可能乱序到达）
+    await manager.query(
+      'UPDATE `tasks` SET `lastSeq` = GREATEST(`lastSeq`, ?) WHERE `id` = ?',
+      [event.seq, event.task_id],
+    )
+    return inserted
+  })
 }
 
 /**
@@ -99,14 +108,16 @@ export async function persistMilestoneEvent(event: RunnerTaskEvent): Promise<boo
  * status / finishedAt / durationMs / transportMode / outputZipPath / sha256 等。
  * failed/canceled 且 session_kept → recoverable（VM 保留，远端可能有成品）。
  */
-export async function finalizeTaskFromTerminalEvent(event: RunnerTaskEvent): Promise<void> {
-  const ds = await getDataSource()
+export async function finalizeTaskFromTerminalEvent(event: RunnerTaskEvent, manager?: EntityManager): Promise<boolean> {
+  const ds = manager ?? await getDataSource()
   const data = event.data ?? {}
   const sessionKept = Boolean(data.session_kept)
   const updates: QueryDeepPartialEntity<Task> = {
     finishedAt: new Date(event.ts),
     sessionKept,
     currentPhase: event.phase,
+    errorCode: null,
+    errorMessage: null,
   }
   if (event.phase === 'task.done') {
     updates.status = 'succeeded'
@@ -127,7 +138,9 @@ export async function finalizeTaskFromTerminalEvent(event: RunnerTaskEvent): Pro
       ? data.mode as CancelMode
       : null
   }
-  await ds.getRepository(TaskSchema).update({ id: event.task_id }, updates)
+  const result = await ds.getRepository(TaskSchema).createQueryBuilder().update()
+    .set(updates).where('id = :id AND lastSeq <= :seq', { id: event.task_id, seq: event.seq }).execute()
+  return !!result.affected
 }
 
 /**
@@ -147,7 +160,7 @@ export async function finalizeTaskFromStoredTerminalEvent(
     },
   })
   if (!row) return false
-  await finalizeTaskFromTerminalEvent({
+  return await finalizeTaskFromTerminalEvent({
     v: 1,
     task_id: taskId,
     seq: row.seq,
@@ -157,7 +170,6 @@ export async function finalizeTaskFromStoredTerminalEvent(
     message: row.message,
     data: row.data ?? {},
   })
-  return true
 }
 
 /**

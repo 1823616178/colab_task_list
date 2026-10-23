@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import type { TaskEvent } from '~/types/events'
+import { finiteMetric as asNumber, sampleIsStale, workflowProgress } from '~/utils/taskMonitoring'
+import type { WorkflowProgress } from '~/utils/taskMonitoring'
 import { mergeLogHistory, parseRunLog } from '~/utils/logHistory'
 
 // doc/04 §3.2：taskStream 单任务 SSE——事件、日志、指标（性能关键）。
@@ -47,11 +49,6 @@ export interface PhaseNode {
 
 export type ConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed'
 
-function asNumber(value: unknown): number | null {
-  const n = Number(value)
-  return Number.isFinite(n) ? n : null
-}
-
 export const useTaskStreamStore = defineStore('taskStream', () => {
   const taskId = ref<string | null>(null)
   const connectionState = ref<ConnectionState>('idle')
@@ -59,6 +56,11 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
   const terminal = ref(false)
   const lastSeq = ref(-1)
   const errorMessage = ref('')
+  const progress = shallowRef<WorkflowProgress | null>(null)
+  const now = ref(Date.now())
+  const openedAt = ref(Date.now())
+  const metricsStale = computed(() => !terminal.value
+    && sampleIsStale(metrics.value.at(-1)?.ts ?? null, openedAt.value, now.value))
 
   const logLines = shallowRef<string[]>([])
   const metrics = shallowRef<MetricSample[]>([])
@@ -76,6 +78,8 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
   let backoffMs = BACKOFF_INIT_MS
   let stopped = true
   let logHistoryLoaded = false
+  let freshnessTimer: ReturnType<typeof setInterval> | null = null
+  let lastFrameAt = 0
 
   function flushLogs() {
     flushTimer = null
@@ -155,8 +159,9 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
     }
   }
 
-  function handleEvent(ev: TaskEvent) {
-    if (ev.seq > lastSeq.value) lastSeq.value = ev.seq
+  function handleEvent(ev: TaskEvent, replay = false) {
+    if (ev.task_id !== taskId.value || !Number.isSafeInteger(ev.seq) || ev.seq <= lastSeq.value) return
+    lastSeq.value = ev.seq
     if (ev.phase === 'drive.mount') {
       const candidate = ev.data?.authorization_url
       if (typeof candidate === 'string') {
@@ -180,47 +185,68 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
       pushMetric(ev)
       return
     }
+    if (ev.phase === 'workflow.exec' && ev.status === 'progress') {
+      progress.value = workflowProgress(ev)
+      if (progress.value.text) pushLog(progress.value.text)
+      return
+    }
     applyMilestone(ev)
-    if (TERMINAL_PHASES.has(ev.phase)) {
+    if (!replay && TERMINAL_PHASES.has(ev.phase)) {
       terminal.value = true
     }
   }
 
   /** 手写 SSE 帧解析：': keepalive' 注释忽略，data 按空行分帧 */
-  async function readStream(body: ReadableStream<Uint8Array>): Promise<void> {
+  async function readStream(body: ReadableStream<Uint8Array>, controller: AbortController): Promise<void> {
     const reader = body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
     let dataLines: string[] = []
+    let eventName = 'task'
     const dispatch = () => {
       if (dataLines.length === 0) return
       const raw = dataLines.join('\n')
       dataLines = []
       try {
-        handleEvent(JSON.parse(raw) as TaskEvent)
+        if (stopped || abortController !== controller) return
+        if (eventName === 'snapshot') {
+          const snapshot = JSON.parse(raw) as { status: string }
+          terminal.value = !['queued', 'running'].includes(snapshot.status)
+        } else {
+          handleEvent(JSON.parse(raw) as TaskEvent, eventName === 'replay')
+        }
       } catch {
         // 单帧解析失败不阻断流
+      } finally {
+        eventName = 'task'
       }
     }
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      let idx: number
-      while ((idx = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, idx).replace(/\r$/, '')
-        buffer = buffer.slice(idx + 1)
-        if (line === '') {
-          dispatch()
-        } else if (line.startsWith(':')) {
-          // keepalive 注释（doc/02 §2.5）
-        } else if (line.startsWith('data:')) {
-          dataLines.push(line.slice(5).replace(/^ /, ''))
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done || stopped || abortController !== controller) break
+        lastFrameAt = Date.now()
+        buffer += decoder.decode(value, { stream: true })
+        let idx: number
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, idx).replace(/\r$/, '')
+          buffer = buffer.slice(idx + 1)
+          if (line === '') {
+            dispatch()
+          } else if (line.startsWith('event:')) {
+            eventName = line.slice(6).trim()
+          } else if (line.startsWith(':')) {
+            // keepalive 注释（doc/02 §2.5）
+          } else if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).replace(/^ /, ''))
+          }
+          // id 信息已包含在 data.seq；event 区分历史回放、快照与实时事件
         }
-        // id:/event: 行信息已在 data 载荷内（seq/phase），无需额外处理
       }
+      dispatch()
+    } finally {
+      reader.releaseLock()
     }
-    dispatch()
   }
 
   async function connect(): Promise<void> {
@@ -228,6 +254,7 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
     abortController?.abort()
     const controller = new AbortController()
     abortController = controller
+    lastFrameAt = Date.now()
     connectionState.value = 'connecting'
 
     const authStore = useAuthStore()
@@ -240,15 +267,20 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
         headers: authStore.accessToken ? { Authorization: `Bearer ${authStore.accessToken}` } : {},
         signal: controller.signal,
       })
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') return
+    } catch {
+      if (stopped || abortController !== controller) return
       scheduleReconnect()
       return
     }
 
+    if (stopped || abortController !== controller) {
+      await res.body?.cancel()
+      return
+    }
     if (res.status === 401) {
       // 复用 apiFetch 插件的合流刷新，避免触发 token 重用保护
       const token = await $apiRefresh()
+      if (stopped || abortController !== controller) return
       if (!token) {
         close()
         await navigateTo('/login')
@@ -271,14 +303,15 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
     backoffMs = BACKOFF_INIT_MS
     if (!logHistoryLoaded && taskId.value) {
       logHistoryLoaded = true
-      void loadLogHistory(taskId.value)
+      void loadLogHistory(taskId.value, controller)
     }
 
     try {
-      await readStream(res.body)
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') return
+      await readStream(res.body, controller)
+    } catch {
+      // 超时主动 abort 也需要重连；旧连接的退出不得影响新连接。
     }
+    if (stopped || abortController !== controller) return
     if (flushTimer) {
       clearTimeout(flushTimer)
       flushLogs()
@@ -293,7 +326,7 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
   }
 
   function scheduleReconnect() {
-    if (stopped || terminal.value) return
+    if (stopped || terminal.value || reconnectTimer) return
     connectionState.value = 'reconnecting'
     const delay = backoffMs
     backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS)
@@ -312,12 +345,22 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
     close()
     stopped = false
     taskId.value = id
+    openedAt.value = Date.now()
+    now.value = openedAt.value
+    freshnessTimer = setInterval(() => {
+      now.value = Date.now()
+      if (!terminal.value && ['open', 'connecting'].includes(connectionState.value)
+        && now.value - lastFrameAt > 45_000) {
+        errorMessage.value = '实时通道超过 45 秒没有响应，正在重连'
+        abortController?.abort()
+      }
+    }, 5_000)
     terminal.value = opts?.terminal ?? false
     void connect()
   }
 
   /** 拉 run.log 并与请求期间 SSE 收到的实时行去重合并。 */
-  async function loadLogHistory(id: string): Promise<void> {
+  async function loadLogHistory(id: string, controller = abortController): Promise<void> {
     const authStore = useAuthStore()
     const { $apiRefresh } = useNuxtApp()
     const url = `/api/tasks/${id}/log`
@@ -332,7 +375,7 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
     }
     if (!res?.ok) return // 日志可能尚未创建（刚排队等），实时流仍会正常追加
     const text = await res.text()
-    if (stopped || taskId.value !== id) return
+    if (stopped || taskId.value !== id || controller !== abortController) return
     const historical = parseRunLog(text)
     const liveLines = linesRaw.slice()
     const liveOverwritable = rawOverwritable
@@ -346,6 +389,9 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
   /** onUnmounted 必须调用（doc/04 §3.2）；浏览器断开不影响 Nitro↔Runner 订阅 */
   function close() {
     stopped = true
+    if (freshnessTimer) clearInterval(freshnessTimer)
+    freshnessTimer = null
+    progress.value = null
     abortController?.abort()
     abortController = null
     if (reconnectTimer) {
@@ -377,6 +423,8 @@ export const useTaskStreamStore = defineStore('taskStream', () => {
     terminal,
     lastSeq,
     errorMessage,
+    progress,
+    metricsStale,
     logLines,
     metrics,
     phases,

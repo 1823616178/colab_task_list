@@ -84,6 +84,7 @@ class EventLog:
         self._seq = start_seq
         self._ring: deque[dict] = deque(maxlen=RING_BUFFER_SIZE)
         self._subscribers: list[queue.Queue] = []
+        self._stream_ended = False
         self._throttle_last: dict[str, float] = {}
         self._events_file = None
         self._run_log_file = None
@@ -99,6 +100,10 @@ class EventLog:
     def emit(self, event: dict) -> dict:
         """路由一个事件（core sink 与 Runner 自产事件共用）。返回重盖 seq 后的事件。"""
         with self._lock:
+            self._stream_ended = event["phase"] in ev.TERMINAL_PHASES
+            # 轮转警告必须先分配 seq，再分配触发轮转的日志 seq。
+            if event["phase"] == ev.PHASE_LOG_LINE:
+                self._append_run_log(event)
             self._seq += 1
             event = {**event, "seq": self._seq, "task_id": self.task_id}
 
@@ -108,9 +113,6 @@ class EventLog:
                 self._ring.append(event)
                 if event["phase"] not in ev.SSE_ONLY_PHASES:
                     self.current_phase = event["phase"]
-
-            if event["phase"] == ev.PHASE_LOG_LINE:
-                self._append_run_log(event)
 
             if self._should_push(event):
                 self._push_locked(event)
@@ -137,7 +139,10 @@ class EventLog:
         with self._lock:
             replay = self._replay_locked(from_seq)
             high_water = self._seq
-            self._subscribers.append(subscriber)
+            if self._stream_ended:
+                subscriber.put_nowait(None)
+            else:
+                self._subscribers.append(subscriber)
         return replay, high_water, subscriber
 
     def unsubscribe(self, subscriber: queue.Queue) -> None:
@@ -177,6 +182,12 @@ class EventLog:
             except queue.Full:
                 # 慢消费者：断开让它走 from_seq 重连补拉，不能拖垮任务线程。
                 self._subscribers.remove(subscriber)
+                while True:
+                    try:
+                        subscriber.get_nowait()
+                    except queue.Empty:
+                        break
+                subscriber.put_nowait(None)
 
     # ── 落盘 ─────────────────────────────────────────────────
 
@@ -245,6 +256,11 @@ class EventLog:
 
     def close(self) -> None:
         with self._lock:
+            self._stream_ended = True
+            self._push_locked(None)
+            self._subscribers.clear()
+            self._ring.clear()
+            self._throttle_last.clear()
             if self._events_file is not None:
                 self._events_file.close()
                 self._events_file = None

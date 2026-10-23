@@ -15,6 +15,7 @@ export interface WorkflowItem {
   acceleratorNote: string | null
   inputFields: { class_type: string, field: string, local_dir: string }[]
   inputImages: WorkflowInputImage[]
+  optionalLastFrame?: boolean
   editableFields: EditableWorkflowField[]
   comfyFlags: string[]
   models: Record<string, unknown>[]

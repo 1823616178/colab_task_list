@@ -1,17 +1,84 @@
 """通道降级回归：私有 API 探测失败时确实退回 CliTransport。"""
 
+import importlib
 import sys
 import threading
 import time
+from types import SimpleNamespace
+
+import pytest
 
 import colab_transport
-from colab_transport import CliTransport, NativeTransport, get_transport
+from colab_transport import CliTransport, NativeTransport, TransportError, get_transport
 from colab_transport.cli import (
     ColabCli,
     cancel_drive_mount,
     confirm_drive_mount,
     resolve_config_path,
 )
+
+
+def test_kernel_probe_checks_exported_client_without_connecting(monkeypatch):
+    """A ColabRuntime property alone cannot prove that its dependency is usable."""
+    importlib.import_module("colab_cli.runtime")
+
+    class OfflineClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Dependency probes must not connect to a kernel")
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def execute(self):
+            pass
+
+        def execute_interactive(self):
+            pass
+
+    module = SimpleNamespace(
+        KernelClient=OfflineClient,
+        JupyterSubprotocol=SimpleNamespace(DEFAULT=""),
+    )
+    monkeypatch.setitem(sys.modules, "jupyter_kernel_client", module)
+    assert colab_transport.probe_kernel_client_api() is True
+    del module.KernelClient
+    assert colab_transport.probe_kernel_client_api() is False
+    assert colab_transport.probe_private_api()["kernel_client"] is False
+    module.KernelClient = OfflineClient
+    del module.JupyterSubprotocol
+    assert colab_transport.probe_kernel_client_api() is False
+
+
+@pytest.mark.parametrize("mode", ["native", "cli"])
+def test_incompatible_kernel_dependency_blocks_both_transports(monkeypatch, mode):
+    monkeypatch.setattr(colab_transport, "probe_kernel_client_api", lambda: False)
+    with pytest.raises(TransportError, match="内核依赖不兼容"):
+        get_transport(mode)
+
+
+def test_installed_client_supports_actual_colab_runtime_construction(monkeypatch):
+    """Exercise CLI 0.6.0's real client lookup and constructor, with networking disabled."""
+    import jupyter_kernel_client
+    import requests
+    from colab_cli.runtime import ColabRuntime
+
+    def reject_network(*args, **kwargs):
+        raise AssertionError("This compatibility test must not contact Colab")
+
+    monkeypatch.setattr(requests.Session, "request", reject_network)
+    monkeypatch.setattr(jupyter_kernel_client.KernelClient, "start", lambda self: None)
+    monkeypatch.setattr(ColabRuntime, "_apply_ws_hook", lambda self: None)
+    runtime = ColabRuntime(
+        url="http://127.0.0.1:1", token="test", session_id="offline-session",
+    )
+    client = runtime.kernel_client
+    assert isinstance(client, jupyter_kernel_client.KernelClient)
+    assert client._own_kernel is False
+    assert callable(client.execute_interactive)
+    client.stop()
 
 
 def test_native_when_probe_ok(monkeypatch):

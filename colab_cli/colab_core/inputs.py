@@ -60,6 +60,67 @@ def collect_input_references(workflow, input_fields):
     return references
 
 
+def _linked_node_ids(node: dict) -> set[str]:
+    """Return upstream IDs from ComfyUI API input connections."""
+    return {
+        value[0]
+        for value in node.get("inputs", {}).values()
+        if isinstance(value, list) and len(value) == 2
+        and isinstance(value[0], str) and isinstance(value[1], int)
+    }
+
+
+def apply_optional_last_frame(
+    workflow: dict,
+    workflow_config: dict,
+    use_last_frame: bool | None,
+) -> bool:
+    """Remove disabled tail-frame inputs from this task's in-memory graph.
+
+    Only workflows explicitly declaring optional_last_frame opt in. Shared
+    upstream nodes remain when another input still consumes them. Return
+    whether the graph changed so even tasks without scalar overrides write
+    the transformed API snapshot.
+    """
+    if workflow_config.get("optional_last_frame") is not True:
+        if use_last_frame is not None:
+            raise TaskError("当前工作流不支持尾帧开关")
+        return False
+    if use_last_frame is True:
+        return False
+
+    candidates = set()
+    changed = False
+    for node in workflow.values():
+        if node.get("class_type") != "MiniMaxH3ImageToVideo":
+            continue
+        inputs = node.get("inputs", {})
+        if "last_frame" not in inputs:
+            continue
+        connection = inputs.pop("last_frame")
+        changed = True
+        candidates.update(_linked_node_ids({"inputs": {"last_frame": connection}}))
+
+    pending = list(candidates)
+    while pending:
+        node = workflow.get(pending.pop())
+        if not isinstance(node, dict):
+            continue
+        for upstream in _linked_node_ids(node) - candidates:
+            candidates.add(upstream)
+            pending.append(upstream)
+
+    while candidates:
+        referenced = set().union(*(_linked_node_ids(node) for node in workflow.values()))
+        unused = candidates - referenced
+        if not unused:
+            break
+        for node_id in unused:
+            workflow.pop(node_id, None)
+        candidates -= unused
+    return changed
+
+
 def build_search_dirs(input_dir, api_json):
     """构建去重后的本地输入文件搜索目录。"""
     candidates = [

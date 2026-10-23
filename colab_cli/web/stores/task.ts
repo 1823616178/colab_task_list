@@ -13,6 +13,15 @@ export type TaskStatus =
 
 export type CancelMode = 'interrupt' | 'destroy'
 export type FtpUploadStatus = 'pending' | 'uploading' | 'uploaded' | 'failed'
+/** 模型获取方式：自动 / 直接下载到 VM / Drive 软链接 / Drive 复制 */
+export type ModelMode = 'auto' | 'download' | 'symlink' | 'copy'
+
+export const MODEL_MODE_LABELS: Record<ModelMode, string> = {
+  auto: '自动',
+  download: '直接下载',
+  symlink: 'Drive 软链接',
+  copy: 'Drive 复制',
+}
 
 /** GET /api/tasks 返回的任务行（doc/03 §3；datetime 序列化为 ISO 串，bigint 为 string） */
 export interface TaskRow {
@@ -25,6 +34,7 @@ export interface TaskRow {
   acceleratorKind: 'gpu' | 'tpu'
   acceleratorSpec: string
   mountDrive: boolean
+  modelMode: ModelMode
   reuse: boolean
   keep: boolean
   timeout: number
@@ -64,11 +74,14 @@ export interface SubmitTaskPayload {
   /** 计算后端，缺省 colab */
   backend?: 'colab' | 'kaggle' | 'modal'
   mount_drive: boolean
+  model_mode?: ModelMode
   reuse: boolean
   keep: boolean
   input_dir: string | null
   /** 工作流 editable_fields 白名单内的任务级 API 节点输入覆盖。 */
   workflow_overrides: Record<string, string>
+  /** 仅声明 optional_last_frame 的工作流可使用；默认关闭。 */
+  use_last_frame?: boolean
   /** 秒 */
   timeout: number
   /** Runner 演练通道（不烧计算单元），仅调试 */

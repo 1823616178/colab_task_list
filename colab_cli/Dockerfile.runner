@@ -13,14 +13,24 @@ RUN apt-get update \
 WORKDIR /srv/colab_cli
 COPY requirements.txt requirements-backends.txt ./
 RUN pip install -r requirements.txt \
-    && if [ "$INSTALL_BACKENDS" = "1" ]; then pip install -r requirements-backends.txt; fi
+    && if [ "$INSTALL_BACKENDS" = "1" ]; then pip install -r requirements-backends.txt; fi \
+    && pip check
 
 COPY . .
+# pip check 不检测上游代码使用的类名；构建时验证真实安装的执行 API。
+RUN python -c "from colab_transport import probe_private_api; probe = probe_private_api(); assert all(probe.values()), probe"
+
+# 与 Web 的 node 用户同为 UID/GID 1000，共享产物可读写、可清理。
+RUN groupadd --gid 1000 runner \
+    && useradd --uid 1000 --gid runner --create-home runner \
+    && mkdir -p /data/colab_output /data/colab_uploads /data/state /home/runner/.config/colab-cli \
+    && chown -R runner:runner /data /srv/colab_cli /home/runner
 
 ENV COLAB_RUNNER_HOST=0.0.0.0 \
     COLAB_RUNNER_PORT=8765 \
     COLAB_OUTPUT_DIR=/data/colab_output \
     COLAB_BACKEND_STATE_DIR=/data/backend_state
+USER runner
 EXPOSE 8765
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
     CMD curl -fsS "http://127.0.0.1:${COLAB_RUNNER_PORT}/health" -H "X-Internal-Token: ${COLAB_RUNNER_TOKEN}" >/dev/null || exit 1

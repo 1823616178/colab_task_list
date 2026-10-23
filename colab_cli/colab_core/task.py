@@ -18,9 +18,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from colab_transport import TransportError, get_transport
-
-from .resilience import is_transient_error, reattach_workflow, retry_transient
+from colab_transport import TransportError, WorkflowNotSubmittedError, get_transport
 from colab_transport.transfer import file_sha256
 
 from . import events as ev
@@ -28,6 +26,7 @@ from .config import TaskConfig, TaskResult
 from .errors import TaskError
 from .events import EventEmitter
 from .inputs import (
+    apply_optional_last_frame,
     build_search_dirs,
     collect_input_references,
     load_json,
@@ -36,6 +35,7 @@ from .inputs import (
     validate_workflow_accelerator,
 )
 from .paths import HERE, REMOTE_SETUP, REMOTE_WORKFLOW, default_output_root
+from .resilience import is_transient_error, reattach_workflow, retry_transient
 from .sessions import ensure_reusable_session
 
 
@@ -172,10 +172,10 @@ def _snapshot_api_json(
     source: Path,
     destination: Path,
     workflow: dict,
-    has_overrides: bool,
+    has_changes: bool,
 ) -> None:
-    """写任务 API 快照；有覆盖时序列化内存副本，绝不修改共享源文件。"""
-    if not has_overrides:
+    """写任务 API 快照；图有修改时序列化内存副本，绝不修改共享源文件。"""
+    if not has_changes:
         shutil.copyfile(source, destination)
         return
     destination.write_text(
@@ -212,10 +212,9 @@ def _run_real(
     task_id: str,
     started_monotonic: float,
 ) -> TaskResult:
-    transport = get_transport(cfg.transport_mode, sink=_sink(emitter), backend=cfg.backend)
-
     # ── 预检段（旧 main() try 块之前的部分）：失败不触碰会话 ──
     try:
+        transport = get_transport(cfg.transport_mode, sink=_sink(emitter), backend=cfg.backend)
         workflow_config_path = cfg.workflow_config
         workflow_config = load_json(workflow_config_path, "工作流配置")
         api_json = resolve_api_json(cfg.api_json, workflow_config_path, workflow_config)
@@ -225,6 +224,7 @@ def _run_real(
             workflow_config.get("editable_fields", []),
             cfg.workflow_overrides,
         )
+        frame_inputs_changed = apply_optional_last_frame(workflow, workflow_config, cfg.use_last_frame)
         input_dir_overridden = cfg.input_dir is not None
         input_dir = cfg.input_dir or (HERE / "image")
         input_references = collect_input_references(
@@ -260,6 +260,7 @@ def _run_real(
                 "reuse": cfg.reuse,
                 "keep": cfg.keep,
                 "mount_drive": cfg.mount_drive,
+                "model_mode": cfg.model_mode,
                 "timeout": cfg.timeout,
                 "transport": transport.mode,
                 "backend": cfg.backend,
@@ -293,7 +294,7 @@ def _run_real(
         out_dir.mkdir(parents=True, exist_ok=True)
         api_snapshot = out_dir / "api.json"
         _snapshot_api_json(
-            api_json, api_snapshot, workflow, bool(cfg.workflow_overrides)
+            api_json, api_snapshot, workflow, bool(cfg.workflow_overrides) or frame_inputs_changed
         )
         config_snapshot = out_dir / "workflow.json"
         shutil.copyfile(workflow_config_path, config_snapshot)
@@ -385,7 +386,9 @@ def _run_real(
             {"count": len(staged_inputs) + 2, "session": cfg.session},
         )
         run_config = {
+            "backend": cfg.backend,
             "mount_drive": cfg.mount_drive,
+            "model_mode": cfg.model_mode,
             "accelerator": accelerator_type,
             "input_files": [
                 {
@@ -448,6 +451,9 @@ def _run_real(
                 cfg.session, REMOTE_WORKFLOW, cfg.timeout, output_zip, _sink(emitter)
             )
         except Exception as error:
+            if isinstance(error, WorkflowNotSubmittedError):
+                workflow_started = False
+                raise
             # 执行阶段断线：不重放工作流（会重复计费、覆盖产物），
             # 而是探测远端会话与产物清单，远端跑完后改走下载通道
             if not is_transient_error(error) or not _reattach_after_disconnect(
@@ -684,6 +690,7 @@ def _run_dry(
         workflow_config.get("editable_fields", []),
         cfg.workflow_overrides,
     )
+    frame_inputs_changed = apply_optional_last_frame(workflow, workflow_config, cfg.use_last_frame)
     input_dir_overridden = cfg.input_dir is not None
     input_dir = cfg.input_dir or (HERE / "image")
     input_references = collect_input_references(
@@ -739,7 +746,7 @@ def _run_dry(
         api_json,
         out_dir / "api.json",
         workflow,
-        bool(cfg.workflow_overrides),
+        bool(cfg.workflow_overrides) or frame_inputs_changed,
     )
     shutil.copyfile(workflow_config_path, out_dir / "workflow.json")
     _snapshot_inputs(out_dir, staged_inputs)
@@ -807,6 +814,16 @@ def _run_dry(
     emitter.emit(ev.PHASE_MODEL_PREPARE, ev.STATUS_START,
                  f">>> [2/4] 准备模型 ({len(models)} 个)",
                  {"total": len(models), "total_bytes": total_bytes})
+    if cfg.model_mode == "download" or not cfg.mount_drive:
+        model_source, model_action = "huggingface", "download"
+    elif cfg.model_mode == "symlink":
+        model_source, model_action = "drive_cache", "symlink"
+    elif cfg.model_mode == "copy":
+        model_source, model_action = "drive_cache", "copy"
+    elif cfg.backend == "colab":
+        model_source, model_action = "drive_cache", "copy"
+    else:
+        model_source, model_action = "drive_cache", "symlink"
     for index, model in enumerate(models, start=1):
         size = int(model.get("size_bytes", 0))
         for done_fraction in (0.4, 0.8, 1.0):
@@ -821,8 +838,8 @@ def _run_dry(
                     "repo": model.get("repo", ""),
                     "filename": model.get("filename", ""),
                     "size_bytes": size,
-                    "source": "drive_cache" if cfg.mount_drive else "huggingface",
-                    "action": "symlink" if cfg.mount_drive else "download",
+                    "source": model_source,
+                    "action": model_action,
                     "done_bytes": int(size * done_fraction),
                 },
             )

@@ -7,6 +7,7 @@ events.jsonl 落盘过 schema）、from_seq 回放、SESSION_BUSY、queued/runni
 import json
 import os
 import re
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -166,6 +167,16 @@ def test_health(client):
     assert body["recovered_inflight"] == []
 
 
+def test_health_rejects_incompatible_kernel_dependency(client, monkeypatch):
+    monkeypatch.setattr(runner_app, "probe_kernel_client_api", lambda: False)
+    response = client.get("/health", headers=AUTH)
+    assert response.status_code == 503
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "KERNEL_CLIENT_INCOMPATIBLE"
+    assert body["transport"]["probe"]["kernel_client"] is False
+
+
 def test_drive_confirmation_endpoint(client, monkeypatch, tmp_path):
     task_id = "20260823-120000-abcdef12"
     record = runner_manager.TaskRecord(
@@ -248,6 +259,38 @@ def test_task_workflow_override_is_written_to_snapshot(client, mini_workflow):
     source = json.loads(source_path.read_text(encoding="utf-8"))
     assert snapshot["3"]["inputs"]["prompt"] == "任务级 prompt"
     assert source["3"]["inputs"]["prompt"] == "默认 prompt"
+
+
+@pytest.mark.parametrize("enabled", [None, False, True])
+def test_task_optional_tail_flag_reaches_snapshot(client, mini_workflow, enabled):
+    """The HTTP boundary preserves explicit true/false and the default-off path."""
+    config = json.loads(mini_workflow.read_text(encoding="utf-8"))
+    config["optional_last_frame"] = True
+    mini_workflow.write_text(json.dumps(config), encoding="utf-8")
+    api_path = mini_workflow.parent / "api.json"
+    api = json.loads(api_path.read_text(encoding="utf-8"))
+    api["3"]["inputs"].update({"first_frame": ["1", 0], "last_frame": ["4", 0]})
+    api["4"] = {"class_type": "LoadImage", "inputs": {"image": "tail.png"}}
+    api_path.write_text(json.dumps(api), encoding="utf-8")
+    if enabled:
+        (mini_workflow.parent / "tail.png").write_bytes(b"tail image")
+
+    options = {} if enabled is None else {"use_last_frame": enabled}
+    task_id = submit(client, mini_workflow, **options)
+    assert wait_status(client, task_id)["status"] == "succeeded"
+    task_dir = client.app.state.manager.output_root / task_id
+    snapshot = json.loads((task_dir / "api.json").read_text(encoding="utf-8"))
+    assert ("4" in snapshot) is (enabled is True)
+    assert ("last_frame" in snapshot["3"]["inputs"]) is (enabled is True)
+    assert (task_dir / "inputs" / "tail.png").exists() is (enabled is True)
+
+
+def test_task_rejects_string_tail_flag(client, mini_workflow):
+    response = client.post(
+        "/tasks", json=make_payload(mini_workflow, use_last_frame="false"), headers=AUTH,
+    )
+    assert response.status_code == 400
+    assert "use_last_frame" in response.json()["error"]["message"]
 
 
 def test_metrics_and_log_not_persisted_but_in_run_log(client, mini_workflow):
@@ -585,6 +628,36 @@ def test_redownload_flow(client, mini_workflow, monkeypatch):
     output = client.get(f"/tasks/{task_id}/output", headers=AUTH)
     assert output.status_code == 200
     assert output.json()["path"] == str(output_zip)
+
+
+def test_redownload_live_replay_ignores_previous_terminal(client, mini_workflow, monkeypatch):
+    """重取期间从头订阅：旧失败不能截断新的下载阶段与最终成功。"""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingTransport(_FakeTransport):
+        def download_output(self, session, output_zip, sink):
+            entered.set()
+            assert release.wait(timeout=5)
+            super().download_output(session, output_zip, sink)
+
+    monkeypatch.setattr(runner_manager, "run_task", _fake_failed_run_task)
+    monkeypatch.setattr(runner_manager, "get_transport", lambda *a, **kw: BlockingTransport())
+    task_id = submit(client, mini_workflow, session="s-replay-retry")
+    wait_status(client, task_id)
+    assert client.post(f"/tasks/{task_id}/redownload", headers=AUTH).status_code == 202
+    try:
+        assert entered.wait(timeout=5)
+        stream = runner_app.events_generator(client.app.state.manager, task_id, -1)
+    finally:
+        release.set()
+    wait_status(client, task_id)
+    frames = list(stream)
+    events = parse_sse("".join(frames).splitlines())
+    assert [e["phase"] for e in events if e["phase"] in ("task.failed", "task.done")] == [
+        "task.failed", "task.done",
+    ]
+    assert any(e["phase"] == "output.transfer" and e["status"] == "ok" for e in events)
 
 
 def test_redownload_after_cancel(client, mini_workflow, monkeypatch):

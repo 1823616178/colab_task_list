@@ -1,40 +1,25 @@
-# 一条命令同时启动 Web 控制台 + Python Runner + MySQL：
-#   cp .env.docker.example .env.docker   # 填密钥
-#   docker compose --env-file .env.docker up -d --build
-# Runner、MySQL 都不映射宿主端口；只有 Web 映射到宿主 ${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}。
+# 复用 web/.env 中已有的 MySQL 和密钥，只启动 Web + Python Runner：
+#   docker compose --env-file web/.env up -d --build
+# 可选 Docker 覆盖配置：再加 --env-file .env.docker（模板见 .env.docker.example）。
+# 只有 Web 发布端口，Runner 仅供容器内部访问。
 name: colab-task
 
 services:
-  mysql:
-    image: mysql:8.4
-    restart: unless-stopped
-    environment:
-      MYSQL_DATABASE: ${DB_NAME:-colab_task}
-      MYSQL_USER: ${DB_USER:-colab}
-      MYSQL_PASSWORD: ${DB_PASSWORD:?请在 .env.docker 设置 DB_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?请在 .env.docker 设置 DB_ROOT_PASSWORD}
-      TZ: ${TZ:-Asia/Shanghai}
-    volumes:
-      - mysql_data:/var/lib/mysql
-    networks: [db]
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-
   runner:
     build:
       context: .
       dockerfile: Dockerfile.runner
       args:
         INSTALL_BACKENDS: ${INSTALL_BACKENDS:-0}
+        HTTP_PROXY: ${DOCKER_HTTP_PROXY:-}
+        HTTPS_PROXY: ${DOCKER_HTTP_PROXY:-}
+        http_proxy: ${DOCKER_HTTP_PROXY:-}
+        https_proxy: ${DOCKER_HTTP_PROXY:-}
     restart: unless-stopped
     environment:
-      COLAB_RUNNER_TOKEN: ${RUNNER_TOKEN:?请在 .env.docker 设置 RUNNER_TOKEN}
+      COLAB_RUNNER_TOKEN: ${NUXT_RUNNER_TOKEN:?请使用 --env-file web/.env 并设置 NUXT_RUNNER_TOKEN}
       COLAB_RUNNER_HOST: 0.0.0.0
-      COLAB_RUNNER_ALLOW_NON_LOOPBACK: "1"   # 只在内部网络 backend 上，未发布端口
+      COLAB_RUNNER_ALLOW_NON_LOOPBACK: "1"   # 只在 runner 网络上，未发布端口
       COLAB_RUNNER_WORKERS: ${RUNNER_WORKERS:-4}
       COLAB_TRANSPORT: ${COLAB_TRANSPORT:-native}
       COLAB_CLI_STATE_DIR: /data/state/colab_sessions
@@ -48,13 +33,19 @@ services:
       KAGGLE_MODELS_DATASET: ${KAGGLE_MODELS_DATASET:-}
       MODAL_SECRETS: ${MODAL_SECRETS:-}
       TZ: ${TZ:-Asia/Shanghai}
+      HTTP_PROXY: ${DOCKER_HTTP_PROXY:-}
+      HTTPS_PROXY: ${DOCKER_HTTP_PROXY:-}
+      NO_PROXY: ${DOCKER_NO_PROXY:-localhost,127.0.0.1,::1,runner,web,host.docker.internal}
     volumes:
       # 与 web 同路径挂同一个卷：Web 直接读 Runner 写的产物/事件（runnerOutputDir）
       - colab_output:/data/colab_output
-      - ./workflows:/srv/colab_cli/workflows
+      # 共享仓库及其父目录：旧版 MiniMax 配置引用 ../../api.json。
+      # 图片、flows/*.json 和 api.json 需要可写，且 Web/Runner 必须看到同一份文件。
+      - ../:/srv
+      - colab_uploads:/data/colab_uploads
       - runner_state:/data/state
-      # Colab 登录态（google-colab-cli 的 OAuth 凭据目录），可写：令牌刷新要回写
-      - ${COLAB_AUTH_DIR:-./secrets/colab}:/root/.config/colab-cli
+      # 可写：OAuth 令牌刷新要回写；宿主凭据目录也可通过 COLAB_AUTH_DIR 指定。
+      - ${COLAB_AUTH_DIR:-./secrets/colab}:/home/runner/.config/colab-cli
     # runner 网络需要出网（Colab/Kaggle/Modal API），但不设 ports：Runner 能创建计费 VM，绝不映射到宿主
     networks: [runner]
     expose: ["8765"]
@@ -68,49 +59,56 @@ services:
   web:
     build:
       context: ./web
+      args:
+        HTTP_PROXY: ${DOCKER_HTTP_PROXY:-}
+        HTTPS_PROXY: ${DOCKER_HTTP_PROXY:-}
+        http_proxy: ${DOCKER_HTTP_PROXY:-}
+        https_proxy: ${DOCKER_HTTP_PROXY:-}
     restart: unless-stopped
     depends_on:
-      mysql:
-        condition: service_healthy
       runner:
         condition: service_healthy
-    # 其余 NUXT_*（如 NUXT_FTP_*）可直接写在 .env.docker 里透传
+    # 直接复用本地 MySQL、JWT、管理员、FTP 等配置，不再另建 MySQL。
     env_file:
+      - path: web/.env
+        required: true
       - path: .env.docker
         required: false
     environment:
-      NUXT_DB_HOST: mysql
-      NUXT_DB_PORT: 3306
-      NUXT_DB_USER: ${DB_USER:-colab}
-      NUXT_DB_PASSWORD: ${DB_PASSWORD}
-      NUXT_DB_NAME: ${DB_NAME:-colab_task}
-      NUXT_JWT_SECRET: ${JWT_SECRET:?请在 .env.docker 设置 JWT_SECRET}
-      NUXT_ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
-      NUXT_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env.docker 设置 ADMIN_PASSWORD}
+      # 已有数据库通过迁移升级，避免沿用本地开发的 synchronize=true。
+      NUXT_DB_SYNCHRONIZE: ${DOCKER_DB_SYNCHRONIZE:-false}
+      NUXT_DB_LOGGING: ${DOCKER_DB_LOGGING:-false}
       # 本机 http 访问时须为 false，否则浏览器不回传 Secure cookie；上 HTTPS 反代后改 true
       NUXT_AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       NUXT_RUNNER_URL: http://runner:8765
-      NUXT_RUNNER_TOKEN: ${RUNNER_TOKEN}
+      NUXT_RUNNER_TOKEN: ${NUXT_RUNNER_TOKEN}
       NUXT_REPO_ROOT: /srv/colab_cli
       NUXT_RUNNER_OUTPUT_DIR: /data/colab_output
       NUXT_OUTPUT_RETENTION_DAYS: ${OUTPUT_RETENTION_DAYS:-14}
+      # web/.env 的 NITRO_PORT 是宿主端口，容器内固定监听 3000。
+      NITRO_HOST: 0.0.0.0
+      NITRO_PORT: 3000
+      # 首尾帧先由 Web 落临时文件，再交给 Runner，不能使用各容器独立的 /tmp。
+      TMPDIR: /data/colab_uploads
       TZ: ${TZ:-Asia/Shanghai}
+      HTTP_PROXY: ${DOCKER_HTTP_PROXY:-}
+      HTTPS_PROXY: ${DOCKER_HTTP_PROXY:-}
+      NO_PROXY: ${DOCKER_NO_PROXY:-localhost,127.0.0.1,::1,runner,web,host.docker.internal}
+      NODE_USE_ENV_PROXY: "1"
     volumes:
       - colab_output:/data/colab_output
-      # Web 读工作流配置 / api.json / 示例图片（只读），workflows 可写
-      - ./:/srv/colab_cli:ro
-      - ./workflows:/srv/colab_cli/workflows
-    networks: [db, runner, frontend]
+      - ../:/srv
+      - colab_uploads:/data/colab_uploads
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [runner]
     ports:
-      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+      - "${WEB_BIND:-${NITRO_HOST:-127.0.0.1}}:${WEB_PORT:-${NITRO_PORT:-54471}}:3000"
 
 networks:
-  db:
-    internal: true   # 无外网：只有 mysql 与 web
   runner: {}         # runner ↔ web；可出网，未发布端口
-  frontend: {}
 
 volumes:
-  mysql_data:
   colab_output:
+  colab_uploads:
   runner_state:

@@ -24,7 +24,11 @@ from colab_core.sessions import (
     stop_named_session,
     stop_unmapped_endpoint,
 )
-from colab_transport import colab_cli_version, probe_private_api
+from colab_transport import (
+    colab_cli_version,
+    probe_kernel_client_api,
+    probe_private_api,
+)
 
 from . import __version__
 from . import sessions as sessions_service
@@ -122,12 +126,14 @@ def create_app(
     @app.get("/health")
     def health(request: Request):
         probe = probe_private_api()
+        kernel_dependency_ok = probe_kernel_client_api()
+        probe["kernel_client"] = probe["kernel_client"] and kernel_dependency_ok
         requested = (os.environ.get("COLAB_TRANSPORT") or "native").lower()
         # 与 get_transport() 的降级语义一致：探测失败 → 实际走 cli
         mode = "cli" if requested == "cli" or not all(probe.values()) else "native"
         mgr = manager(request)
-        return {
-            "ok": True,
+        body = {
+            "ok": kernel_dependency_ok,
             "version": __version__,
             "colab_cli_version": colab_cli_version(),
             "transport": {
@@ -139,6 +145,13 @@ def create_app(
             "running_tasks": mgr.running_count(),
             "recovered_inflight": list(mgr.recovered_inflight),
         }
+        if not kernel_dependency_ok:
+            body.update(error_body(
+                "KERNEL_CLIENT_INCOMPATIBLE",
+                "Colab 内核依赖不兼容，请按 requirements.txt 重新安装依赖并重启 Runner",
+            ))
+            return JSONResponse(status_code=503, content=body)
+        return body
 
     # ── 2.3 任务 ─────────────────────────────────────────────
 
@@ -232,7 +245,11 @@ def create_app(
     @app.get("/sessions")
     def list_sessions(request: Request):
         mgr = manager(request)
-        entries = sessions_service.list_sessions()
+        try:
+            entries = sessions_service.list_sessions()
+        except sessions_service.SessionQueryError as error:
+            return JSONResponse(status_code=503,
+                                content=error_body("SESSION_QUERY_FAILED", str(error)))
         for entry in entries:
             task_id = mgr.task_id_for_session(entry.get("name") or "")
             if task_id is not None:
@@ -265,7 +282,9 @@ def create_app(
                 ),
             )
         try:
-            return create_named_session(name, kind, spec, mount_drive)
+            result = create_named_session(name, kind, spec, mount_drive)
+            sessions_service.invalidate_sessions()
+            return result
         except ValueError as error:
             return JSONResponse(
                 status_code=400,
@@ -283,6 +302,7 @@ def create_app(
     def delete_session_by_endpoint(endpoint: str):
         try:
             stop_unmapped_endpoint(endpoint)
+            sessions_service.invalidate_sessions()
         except ValueError as error:
             return JSONResponse(
                 status_code=400,
@@ -306,6 +326,7 @@ def create_app(
             )
         # 会话已确认停止：解除 Runner 重启恢复时挂在其上的对账锁
         manager(request).release_recovered_session(name)
+        sessions_service.invalidate_sessions()
         return {"ok": True, "name": name, "log": log}
 
     return app
@@ -340,14 +361,17 @@ def events_generator(mgr: TaskManager, task_id: str, from_seq: int):
         and record.status in ("queued", "running", "redownloading")
     )
     if live:
-        replay, high_water, subscriber = record.event_log.subscribe(from_seq)
+        event_log = record.event_log
+        replay, high_water, subscriber = event_log.subscribe(from_seq)
 
         def live_stream():
             try:
                 for event in replay:
                     yield _sse_frame(event)
-                    if event["phase"] in ev.TERMINAL_PHASES:
-                        return  # 订阅前刚好终态：回放里已含终态事件
+                    if (event["phase"] in ev.TERMINAL_PHASES
+                            and record.terminal
+                            and event["seq"] == record.last_seq):
+                        return  # 只接受当前终态；redownload 前的失败仅是历史
                 while True:
                     try:
                         item = subscriber.get(timeout=SSE_KEEPALIVE_SECONDS)
@@ -362,7 +386,7 @@ def events_generator(mgr: TaskManager, task_id: str, from_seq: int):
                     if item["phase"] in ev.TERMINAL_PHASES:
                         return
             finally:
-                record.event_log.unsubscribe(subscriber)
+                event_log.unsubscribe(subscriber)
 
         return live_stream()
 

@@ -22,6 +22,10 @@ class TransportError(RuntimeError):
     """
 
 
+class WorkflowNotSubmittedError(TransportError):
+    """Execution failed before the workflow code was sent to the remote kernel."""
+
+
 def _null_sink(phase: str, status: str, message: str, data: Any = None) -> None:
     if message:
         print(message, flush=True)

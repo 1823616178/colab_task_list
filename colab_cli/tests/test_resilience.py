@@ -7,7 +7,7 @@ from colab_core.resilience import (
     reattach_workflow,
     retry_transient,
 )
-from colab_transport import TransportError
+from colab_transport import TransportError, WorkflowNotSubmittedError
 
 
 @pytest.mark.parametrize("message", [
@@ -229,3 +229,38 @@ def test_run_task_permanent_exec_error_not_reattached(tmp_path, workflow_files, 
         run_task(_cfg(tmp_path, workflow_files), events.append)
     assert transport.ready_polls == 0
     assert events[-1]["phase"] == "task.failed"
+
+
+@pytest.mark.parametrize("reuse, keep", [(False, False), (False, True), (True, False)])
+def test_unsubmitted_workflow_only_keeps_vm_when_requested(
+    tmp_path, workflow_files, monkeypatch, reuse, keep
+):
+    """A known pre-submission error must not retain a newly created idle VM."""
+    transport = FlakyTransport(exec_error=WorkflowNotSubmittedError("Connection was lost before submit"))
+    _patch(monkeypatch, transport)
+    stopped = []
+    monkeypatch.setattr(transport, "stop_session", stopped.append)
+    cfg = _cfg(tmp_path, workflow_files)
+    cfg.reuse = reuse
+    cfg.keep = keep
+    events = []
+    with pytest.raises(WorkflowNotSubmittedError):
+        run_task(cfg, events.append)
+    assert transport.ready_polls == 0
+    assert bool(stopped) is not (reuse or keep)
+    assert events[-1]["data"]["session_kept"] is (reuse or keep)
+
+
+def test_unknown_execution_failure_preserves_new_vm(tmp_path, workflow_files, monkeypatch):
+    """An ambiguous failure after submission still preserves possible output."""
+    transport = FlakyTransport(exec_error=RuntimeError("execution interrupted"))
+    _patch(monkeypatch, transport)
+    stopped = []
+    monkeypatch.setattr(transport, "stop_session", stopped.append)
+    cfg = _cfg(tmp_path, workflow_files)
+    cfg.reuse = False
+    events = []
+    with pytest.raises(RuntimeError, match="execution interrupted"):
+        run_task(cfg, events.append)
+    assert stopped == []
+    assert events[-1]["data"]["session_kept"] is True

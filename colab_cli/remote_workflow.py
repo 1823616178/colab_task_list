@@ -3,10 +3,13 @@
 # 模型、输入节点和 ComfyUI 参数由 /content/workflow_config.json 描述。
 # =============================================================================
 import base64
+import errno
+import fcntl
 import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -15,6 +18,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import deque
+from contextlib import contextmanager
 
 COMFY = "/content/ComfyUI"
 OUT_DIR = "/content/output"
@@ -34,7 +38,7 @@ WORKFLOW_CONFIG = "/content/workflow_config.json"
 PORT = 8188
 RESOURCE_SAMPLE_INTERVAL = 1
 RESOURCE_DISPLAY_INTERVAL = 2
-NON_TTY_RESOURCE_LOG_INTERVAL = 30
+NON_TTY_RESOURCE_LOG_INTERVAL = 5
 NON_TTY_PROGRESS_PERCENT_STEP = 10
 RESOURCE_HISTORY_SECONDS = 30
 HISTORY_POLL_INTERVAL = 30
@@ -43,6 +47,20 @@ DRIVE_MOUNT_POINT = "/content/drive"
 DRIVE_MY_DRIVE_DIR = "/content/drive/MyDrive"
 DRIVE_MODELS_DIR = "/content/drive/MyDrive/code/backup/models"
 CUSTOM_NODES_DIR = f"{COMFY}/custom_nodes"
+MODEL_LOCK_DIR = "/content/.colab_model_locks"
+MODEL_LOCAL_RESERVE_BYTES = 2 * 1024**3
+MODEL_DOWNLOAD_PREFIX = "__COLAB_MODEL_DOWNLOAD__:"
+MODEL_STORAGE_ERRNOS = {
+    errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EDQUOT,
+    errno.EIO, errno.ESTALE, errno.ENOTCONN,
+}
+MODEL_MODES = ("auto", "download", "symlink", "copy")
+MODEL_MODE_LABELS = {
+    "auto": "自动",
+    "download": "直接下载到 VM",
+    "symlink": "Drive 软链接",
+    "copy": "Drive 复制到 VM",
+}
 
 
 def _emit_structured(kind: str, payload: dict) -> None:
@@ -349,7 +367,7 @@ def copy_with_progress(src, dst):
     """将文件原子复制到目标位置并定期打印进度。"""
     file_size = os.path.getsize(src)
     print(f"正在复制 (大小: {file_size / 1024**3:.2f} GB): {os.path.basename(src)}", flush=True)
-    partial_dst = f"{dst}.part"
+    partial_dst = f"{dst}.{uuid.uuid4().hex}.part"
     try:
         with open(src, "rb") as source, open(partial_dst, "wb") as target:
             copied = 0
@@ -413,20 +431,33 @@ def safe_relative_path(path, description):
 
 def valid_model_file(path, expected_size=None):
     """检查模型文件是否存在、非空且符合可选的精确大小。"""
-    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+    try:
+        size = os.path.getsize(path) if os.path.isfile(path) else 0
+    except OSError:
         return False
-    return expected_size is None or os.path.getsize(path) == expected_size
+    return size > 0 and (expected_size is None or size == expected_size)
 
 
 def link_or_copy(source, target):
     """优先创建模型软链接，失败时回退为原子复制。"""
-    if os.path.islink(target) or os.path.exists(target):
-        os.remove(target)
+    pending = f"{target}.{uuid.uuid4().hex}.link"
     try:
-        os.symlink(source, target)
+        os.symlink(source, pending)
+        os.replace(pending, target)
     except OSError as error:
         print(f"软链接失败({error})，改为复制文件...", flush=True)
         copy_with_progress(source, target)
+    finally:
+        if os.path.lexists(pending):
+            os.remove(pending)
+
+
+def install_model(source, target, mode):
+    """按模式安装模型：copy 强制复制，其余模式优先软链接。"""
+    if mode == "copy":
+        copy_with_progress(source, target)
+    else:
+        link_or_copy(source, target)
 
 
 def run_command(command, cwd=None):
@@ -504,118 +535,353 @@ def prepare_custom_nodes(workflow_config):
         print(f"第三方节点就绪: {name}", flush=True)
 
 
-def prepare_models(workflow_config, mount_drive):
-    """按工作流配置准备模型，并复用可用的 Drive 缓存。"""
-    models = workflow_config.get("models", [])
-    if not isinstance(models, list):
-        raise TypeError("workflow_config.models 必须是列表")
+def prepare_models_legacy(workflow_config, mount_drive, model_mode="auto"):
+    """非 Colab 后端复用模型准备逻辑，auto 默认软链接 Volume/Dataset。"""
+    _prepare_models(workflow_config, mount_drive, "batch", model_mode)
 
-    print(f">>> [2/4] 准备模型 ({len(models)} 个)", flush=True)
-    if mount_drive:
-        print(">>> 检查 Google Drive 现有挂载状态...", flush=True)
-        has_drive = drive_is_mounted()
-        if not has_drive:
-            print(
-                "不会调用 drive.mount() 或触发认证，改用 VM 本地模型缓存",
-                flush=True,
-            )
-    else:
-        print("已按本次启动配置禁用 Google Drive", flush=True)
-        has_drive = False
-    if has_drive:
-        print(f"Google Drive 已就绪，模型存储目录: {DRIVE_MODELS_DIR}", flush=True)
-        os.makedirs(DRIVE_MODELS_DIR, exist_ok=True)
-    else:
-        print("未检测到 Google Drive 挂载，将在 VM 本地下载模型", flush=True)
 
-    if not models:
-        print("当前工作流未配置需要下载的模型", flush=True)
+def run_model_download_worker(repo: str, filename: str, directory: str, *, metadata_only: bool = False) -> dict:
+    """在隔离进程中配置 HF/Xet 缓存，向指定目录下载或只查询文件大小。"""
+    # SDK 在 import 时读取环境变量。新进程也避免已复用的 notebook 内核保留旧缓存路径。
+    worker_code = r'''
+import json, os, ssl, sys
+prefix = "__COLAB_MODEL_DOWNLOAD__:"
+request = json.loads(sys.argv[1])
+try:
+    from huggingface_hub import hf_hub_download, get_hf_file_metadata, hf_hub_url
+    if request["metadata_only"]:
+        info = get_hf_file_metadata(hf_hub_url(request["repo"], request["filename"]))
+        result = {"size": info.size}
+    else:
+        path = hf_hub_download(repo_id=request["repo"], filename=request["filename"], local_dir=request["directory"])
+        result = {"path": path}
+    print(prefix + json.dumps(result), flush=True)
+except Exception as error:
+    storage_errno = None
+    current = error
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if getattr(current, "errno", None) is not None and not isinstance(current, ssl.SSLError):
+            storage_errno = current.errno
+            break
+        current = current.__cause__ or current.__context__
+    # Xet 的 Rust 错误可能没有 Python errno，保留明确的磁盘/配额错误分类。
+    message = str(error)
+    import errno
+    for text, number in [("no space left on device", errno.ENOSPC), ("disk quota exceeded", errno.EDQUOT), ("read-only file system", errno.EROFS)]:
+        if text in message.lower():
+            storage_errno = number
+    print(prefix + json.dumps({"error": type(error).__name__ + ": " + message, "errno": storage_errno}), flush=True)
+    sys.exit(1)
+'''
+    worker_env = dict(os.environ)
+    worker_env.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
+    worker_env["HF_HUB_CACHE"] = os.path.join(directory, ".hf_cache")
+    worker_env["HF_XET_CACHE"] = os.path.join(directory, ".xet")
+    worker_env["HF_XET_CHUNK_CACHE_SIZE_BYTES"] = "0"
+    worker_env.setdefault("TQDM_MININTERVAL", "3")
+    request = {
+        "repo": repo, "filename": filename, "directory": directory,
+        "metadata_only": metadata_only,
+    }
+    result = None
+    with subprocess.Popen(
+        [sys.executable, "-u", "-c", worker_code, json.dumps(request)],
+        env=worker_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    ) as process:
+        try:
+            for line in process.stdout:
+                if line.startswith(MODEL_DOWNLOAD_PREFIX):
+                    result = json.loads(line[len(MODEL_DOWNLOAD_PREFIX):])
+                else:
+                    print(line, end="", flush=True)
+            returncode = process.wait()
+        except BaseException:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            raise
+    if result and result.get("error"):
+        if result.get("errno") in MODEL_STORAGE_ERRNOS:
+            raise OSError(result["errno"], result["error"], directory)
+        raise RuntimeError(f"模型下载源访问失败: {result['error']}")
+    if returncode or not result:
+        raise RuntimeError(f"模型下载进程异常结束 (exit {returncode}): {repo}/{filename}")
+    return result
+
+
+def model_download_directory(root: str, model: dict) -> str:
+    """为每个模型和 VM 隔离断点目录；同一 VM 重试时复用原目录。"""
+    key = hashlib.sha256(f"{model['repo']}/{model['filename']}".encode()).hexdigest()[:24]
+    vm_key = hashlib.sha256(socket.gethostname().encode()).hexdigest()[:12]
+    return os.path.join(root, ".downloads", key, vm_key)
+
+
+@contextmanager
+def model_preparation_lock(cache_path: str):
+    """只在 VM 本地加锁；不依赖 Drive 文件锁提供跨 VM 互斥。"""
+    os.makedirs(MODEL_LOCK_DIR, exist_ok=True)
+    key = hashlib.sha256(cache_path.encode()).hexdigest()
+    with open(os.path.join(MODEL_LOCK_DIR, key + ".lock"), "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"等待本 VM 的模型准备完成: {cache_path}", flush=True)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def model_directory_writable(directory: str) -> bool:
+    """实际探测 Drive 缓存目录写权限；探测文件始终清理。"""
+    probe = os.path.join(directory, f".write-probe-{uuid.uuid4().hex}")
+    try:
+        os.makedirs(directory, exist_ok=True)
+        with open(probe, "wb") as handle:
+            handle.write(b"ok")
+        os.remove(probe)
+        return True
+    except OSError as error:
+        print(f"Google Drive 模型目录不可写: {error}；缺失模型将尝试 VM 本地下载", flush=True)
+        return False
+    finally:
+        try:
+            if os.path.exists(probe):
+                os.remove(probe)
+        except OSError:
+            pass
+
+
+def local_model_has_space(directory: str, size: int) -> bool:
+    """暂存和本地下载都给 ComfyUI/产物预留至少 2 GiB 空间。"""
+    return shutil.disk_usage(directory).free >= size + MODEL_LOCAL_RESERVE_BYTES
+
+
+def install_drive_model(source: str, target: str, mode: str = "copy") -> None:
+    """按模式安装 Drive 模型；copy 优先本地暂存，symlink 直接链接。"""
+    if mode == "symlink":
+        print(f"[Drive 软链] 使用 Drive 缓存: {source} -> {target}", flush=True)
+        install_model(source, target, "symlink")
         return
+    size = os.path.getsize(source)
+    if local_model_has_space(os.path.dirname(target), size):
+        print(f"[VM 暂存] 从 Drive 复制模型供本地加载: {source} -> {target}", flush=True)
+        try:
+            copy_with_progress(source, target)
+            if not valid_model_file(target, size):
+                raise ValueError(f"VM 模型暂存大小校验失败: {target}")
+            return
+        except OSError as error:
+            if error.errno not in {errno.ENOSPC, errno.EDQUOT, errno.EACCES, errno.EPERM, errno.EROFS}:
+                raise
+            print(f"[VM 暂存] 本地写入失败: {error}；改用 Drive 链接", flush=True)
+    else:
+        print(f"[VM 暂存] 本地空间不足，直接从 Drive 加载: {source}", flush=True)
+    if os.path.islink(target) and os.path.realpath(target) == os.path.realpath(source):
+        return
+    link_or_copy(source, target)
 
-    for model in models:
-        if not isinstance(model, dict) or model.get("repo"):
-            continue
-        filename = model.get("filename")
-        comfy_dir = model.get("comfy_dir")
-        if not all(isinstance(value, str) and value for value in
-                   (filename, comfy_dir)):
-            raise ValueError("每个模型必须配置 filename 和 comfy_dir")
-        comfy_dir = safe_relative_path(comfy_dir, "comfy_dir")
-        cache_path = safe_relative_path(
-            model.get("cache_path", filename), "cache_path")
-        expected_size = model.get("size_bytes")
-        local_target = os.path.join(
-            COMFY, "models", comfy_dir, os.path.basename(filename))
-        drive_target = os.path.join(DRIVE_MODELS_DIR, cache_path)
-        if valid_model_file(local_target, expected_size):
-            continue
-        if has_drive and valid_model_file(drive_target, expected_size):
-            continue
-        raise FileNotFoundError(
-            f"模型 {filename} 没有配置公开下载源。请先将正确文件放到 "
-            f"Google Drive: {drive_target}，然后挂载 Drive 后重试。"
+
+def download_model_to_cache(model: dict, root: str, destination: str) -> None:
+    """下载到同一存储内的断点目录，完成校验后才发布最终文件名。"""
+    directory = model_download_directory(root, model)
+    os.makedirs(directory, exist_ok=True)
+    result = run_model_download_worker(model["repo"], model["filename"], directory)
+    downloaded = result["path"]
+    if not valid_model_file(downloaded, model["size_bytes"]):
+        raise ValueError(f"下载模型大小校验失败，未发布缓存: {model['filename']}")
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    # 其他 VM 可能已完成同一个模型；各自的中间文件互不覆盖。
+    if not os.path.islink(destination) and valid_model_file(destination, model["size_bytes"]):
+        os.remove(downloaded)
+    else:
+        os.replace(downloaded, destination)
+    if not valid_model_file(destination, model["size_bytes"]):
+        raise ValueError(f"模型缓存归档后大小校验失败: {destination}")
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+def download_model_locally(model: dict, target: str) -> None:
+    """Drive 不可用时先检查剩余空间，再下载到 VM；网络错误直接向上报告。"""
+    size = model["size_bytes"]
+    if size is None:
+        directory = model_download_directory(os.path.join(COMFY, ".colab_model_cache"), model)
+        info = run_model_download_worker(model["repo"], model["filename"], directory, metadata_only=True)
+        size = info.get("size")
+        if type(size) is not int or size <= 0:
+            raise ValueError(f"无法获取模型大小，无法确认 VM 下载空间: {model['filename']}")
+        model = {**model, "size_bytes": size}
+    if not local_model_has_space(os.path.dirname(target), size):
+        raise OSError(
+            errno.ENOSPC,
+            f"VM 空间不足以下载模型 {model['filename']} ({size / 1024**3:.2f} GiB)，"
+            "需另预留 2 GiB；请释放空间或恢复可写的 Google Drive",
         )
+    print(f"[VM 下载] {model['repo']}/{model['filename']} -> {target}", flush=True)
+    download_model_to_cache(model, os.path.join(COMFY, ".colab_model_cache"), target)
 
-    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
-    from huggingface_hub import hf_hub_download
 
-    for model in models:
-        if not isinstance(model, dict):
+def prepare_models(
+    workflow_config: dict,
+    mount_drive: bool,
+    backend: str = "colab",
+    model_mode: str = "auto",
+) -> None:
+    """按提交时选择的模式准备模型；其他后端沿用兼容策略。"""
+    if model_mode is None:
+        model_mode = "auto"
+    if model_mode not in MODEL_MODES:
+        raise ValueError(f"未知模型获取模式: {model_mode!r}，可选: {', '.join(MODEL_MODES)}")
+    if backend != "colab":
+        prepare_models_legacy(workflow_config, mount_drive, model_mode)
+        return
+    _prepare_models(workflow_config, mount_drive, backend, model_mode)
+
+
+def model_cache_available(backend: str) -> bool:
+    """Colab 验证真实 Drive 挂载，其他后端检查已映射的 Volume/Dataset。"""
+    if backend == "colab":
+        return drive_is_mounted()
+    try:
+        with os.scandir(DRIVE_MODELS_DIR) as entries:
+            next(entries, None)
+    except OSError as error:
+        print(f"模型缓存目录不可访问: {error}，将使用 VM 本地缓存", flush=True)
+        return False
+    return True
+
+
+def _prepare_models(workflow_config, mount_drive, backend, model_mode):
+    """所有后端共享下载、模式切换、校验和空间不足回退。"""
+    if model_mode is None:
+        model_mode = "auto"
+    if model_mode not in MODEL_MODES:
+        raise ValueError(f"未知模型获取模式: {model_mode!r}，可选: {', '.join(MODEL_MODES)}")
+    mode = ("copy" if backend == "colab" else "symlink") if model_mode == "auto" else model_mode
+    raw_models = workflow_config.get("models", [])
+    if not isinstance(raw_models, list):
+        raise TypeError("workflow_config.models 必须是列表")
+    models = []
+    for raw in raw_models:
+        if not isinstance(raw, dict):
             raise TypeError("workflow_config.models 中的每项必须是对象")
-        repo = model.get("repo")
-        filename = model.get("filename")
-        comfy_dir = model.get("comfy_dir")
-        if not all(isinstance(value, str) and value for value in
-                   (filename, comfy_dir)):
-            raise ValueError("每个模型必须配置 filename 和 comfy_dir")
+        for field in ("filename", "comfy_dir"):
+            if not isinstance(raw.get(field), str) or not raw[field]:
+                raise ValueError("每个模型必须配置 filename 和 comfy_dir")
+        repo = raw.get("repo")
         if repo is not None and not isinstance(repo, str):
             raise TypeError("模型 repo 必须是字符串或省略")
+        filename = safe_relative_path(raw["filename"], "filename")
+        comfy_dir = safe_relative_path(raw["comfy_dir"], "comfy_dir")
+        cache_path = safe_relative_path(raw.get("cache_path", filename), "cache_path")
+        if filename == "." or cache_path == ".":
+            raise ValueError("filename 和 cache_path 必须指向文件")
+        size = raw.get("size_bytes")
+        if size is not None and (type(size) is not int or size <= 0):
+            raise TypeError("模型 size_bytes 必须是正整数")
+        models.append({
+            "repo": repo, "filename": filename, "comfy_dir": comfy_dir,
+            "cache_path": cache_path, "size_bytes": size,
+        })
+    print(
+        f">>> [2/4] 准备模型 ({len(models)} 个，{MODEL_MODE_LABELS[model_mode]})",
+        flush=True,
+    )
+    if not models:
+        return
+    has_drive = mount_drive and model_cache_available(backend)
+    drive_writable = (
+        has_drive
+        and mode != "download"
+        and model_directory_writable(DRIVE_MODELS_DIR)
+    )
+    if not has_drive:
+        print("Google Drive 未挂载或已禁用；不会重新认证，将使用 VM 本地模型", flush=True)
+    elif mode == "download":
+        print("直接下载模式：有下载源的模型不会读写 Drive 缓存", flush=True)
 
-        comfy_dir = safe_relative_path(comfy_dir, "comfy_dir")
-        cache_path = safe_relative_path(
-            model.get("cache_path", filename), "cache_path")
-        expected_size = model.get("size_bytes")
-        if expected_size is not None and not isinstance(expected_size, int):
-            raise TypeError("模型 size_bytes 必须是整数")
-
-        dest_dir = os.path.join(COMFY, "models", comfy_dir)
-        os.makedirs(dest_dir, exist_ok=True)
-        target = os.path.join(dest_dir, os.path.basename(filename))
-
-        if os.path.islink(target) and not os.path.exists(target):
-            print(f"检测到死链接, 清理: {target}", flush=True)
-            os.remove(target)
-        elif valid_model_file(target, expected_size):
-            print("已存在, 跳过:", filename, flush=True)
+    # 手动模型先全量检查，避免下载几十 GB 后才发现缺少没有下载源的文件。
+    for model in models:
+        if model["repo"]:
             continue
-
-        drive_target = (
-            os.path.join(DRIVE_MODELS_DIR, cache_path) if has_drive else None)
-
-        if drive_target and valid_model_file(drive_target, expected_size):
-            print(f"[Google Drive] 命中缓存模型: {drive_target} -> {target}", flush=True)
-            link_or_copy(drive_target, target)
+        target = os.path.join(COMFY, "models", model["comfy_dir"], os.path.basename(model["filename"]))
+        drive_target = os.path.join(DRIVE_MODELS_DIR, model["cache_path"])
+        if valid_model_file(target, model["size_bytes"]) or (has_drive and valid_model_file(drive_target, model["size_bytes"])):
             continue
+        raise FileNotFoundError(f"模型 {model['filename']} 没有配置公开下载源，请先放到 Google Drive: {drive_target}")
 
-        if not repo:
-            expected_location = drive_target or os.path.join(
-                DRIVE_MODELS_DIR, cache_path)
-            raise FileNotFoundError(
-                f"模型 {filename} 没有配置公开下载源。请先将正确文件放到 "
-                f"Google Drive: {expected_location}，然后挂载 Drive 后重试。"
+    for model in models:
+        target = os.path.join(COMFY, "models", model["comfy_dir"], os.path.basename(model["filename"]))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with model_preparation_lock(model["cache_path"]):
+            drive_target = os.path.join(DRIVE_MODELS_DIR, model["cache_path"])
+            # 旧任务可能留下 Drive 链接；copy/download 模式会将其重建为 VM 本地文件。
+            is_drive_link = os.path.islink(target) and (
+                os.path.realpath(target) == os.path.realpath(drive_target)
+                or os.path.commonpath([os.path.realpath(target), os.path.realpath(DRIVE_MODELS_DIR)])
+                == os.path.realpath(DRIVE_MODELS_DIR)
             )
+            target_valid = valid_model_file(target, model["size_bytes"])
+            if target_valid and mode == "symlink":
+                # 复用 VM 时模式也必须生效；缺失缓存可直接归档现有完整副本。
+                try:
+                    if has_drive and not valid_model_file(drive_target, model["size_bytes"]) and drive_writable:
+                        os.makedirs(os.path.dirname(drive_target), exist_ok=True)
+                        copy_with_progress(target, drive_target)
+                    if has_drive and valid_model_file(drive_target, model["size_bytes"]):
+                        if not (os.path.islink(target) and os.path.realpath(target) == os.path.realpath(drive_target)):
+                            install_drive_model(drive_target, target, "symlink")
+                        print(f"[Drive 软链] 模型就绪: {model['filename']}", flush=True)
+                        continue
+                except OSError as error:
+                    if error.errno not in MODEL_STORAGE_ERRNOS:
+                        raise
+                    print(f"模型缓存不可用: {error}；保留现有 VM 模型", flush=True)
+                    drive_writable = False
+                print(f"[VM 缓存] 无可用的持久缓存，保留现有模型: {model['filename']}", flush=True)
+                continue
+            if target_valid and not is_drive_link:
+                print(f"[VM 缓存] 已存在，跳过: {model['filename']}", flush=True)
+                continue
+            if mode == "download":
+                if model["repo"]:
+                    download_model_locally(model, target)
+                elif has_drive and valid_model_file(drive_target, model["size_bytes"]):
+                    print(f"[手动模型] 无下载源，使用 Drive 缓存: {drive_target}", flush=True)
+                    install_model(drive_target, target, "symlink")
+                else:
+                    raise FileNotFoundError(
+                        f"手动模型不可访问且没有下载源: {drive_target}")
+                print(f"模型就绪: {model['filename']}", flush=True)
+                continue
 
-        print(f"未在 Google Drive 找到，开始下载 {repo}/{filename}...", flush=True)
-        downloaded = hf_hub_download(repo, filename)
-
-        if drive_target:
-            os.makedirs(os.path.dirname(drive_target), exist_ok=True)
-            print(f"正在保存到 Google Drive 备份: {drive_target} ...", flush=True)
-            copy_with_progress(downloaded, drive_target)
-            link_or_copy(drive_target, target)
-        else:
-            link_or_copy(downloaded, target)
-        print(f"模型就绪: {filename}", flush=True)
+            installed = False
+            try:
+                if has_drive and valid_model_file(drive_target, model["size_bytes"]):
+                    print(f"[Google Drive] 命中缓存模型: {drive_target}", flush=True)
+                    install_drive_model(drive_target, target, mode)
+                    installed = True
+                elif drive_writable:
+                    print(f"[Drive 下载] {model['repo']}/{model['filename']} -> {drive_target}", flush=True)
+                    download_model_to_cache(model, DRIVE_MODELS_DIR, drive_target)
+                    install_drive_model(drive_target, target, mode)
+                    installed = True
+            except OSError as error:
+                if error.errno not in MODEL_STORAGE_ERRNOS:
+                    raise
+                print(f"Google Drive 模型读写失败: {error}；尝试 VM 本地下载", flush=True)
+                drive_writable = False
+            if not installed:
+                if not model["repo"]:
+                    raise FileNotFoundError(f"手动模型不可访问且没有下载源: {drive_target}")
+                download_model_locally(model, target)
+        print(f"模型就绪: {model['filename']}", flush=True)
 
 
 def copy_input_files(run_config):
@@ -835,7 +1101,16 @@ def main():
     print(f">>> 工作流: {workflow_name}", flush=True)
 
     prepare_custom_nodes(workflow_config)
-    prepare_models(workflow_config, run_config.get("mount_drive", True))
+    # 兼容尚未写入 backend 的旧调度进程；Modal/Kaggle 的批处理通道一直设置此环境变量。
+    backend = run_config.get("backend") or (
+        "batch" if os.environ.get("REMOTE_OUTPUT_NO_WAIT") == "1" else "colab"
+    )
+    prepare_models(
+        workflow_config,
+        run_config.get("mount_drive", True),
+        backend,
+        run_config.get("model_mode", "auto"),
+    )
     copy_input_files(run_config)
 
     print(">>> [4/4] 启动 ComfyUI 并运行工作流", flush=True)
@@ -1029,7 +1304,8 @@ def run_workflow(server_proc):
     if not interactive_tty:
         print(
             "检测到非交互式日志通道；使用 ASCII 进度条，"
-            "节点内部进度按 10% 输出，服务器状态每 30 秒输出一次。",
+            "节点内部进度按 10% 输出，"
+            f"服务器状态每 {NON_TTY_RESOURCE_LOG_INTERVAL} 秒输出一次。",
             flush=True,
         )
     update_workflow_bar(0, "等待执行", force=True)

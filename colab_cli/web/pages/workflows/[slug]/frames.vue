@@ -95,9 +95,10 @@ onMounted(async () => {
       <form class="container_workflow_frames_form_body" @submit.prevent="onSubmit">
         <FrameDropZone v-model="firstFile" label="首帧" />
         <FrameDropZone
+          v-if="workflow?.inputImages.some(image => image.label === '尾帧')"
           v-model="lastFile"
           label="尾帧"
-          hint="MiniMax H3 已接 last_frame（节点 122）；其他工作流未接线时会被拒绝"
+          hint="用于控制视频结尾画面；首次使用前请设置工作流所需图片"
         />
 
         <p v-if="errorMessage" class="container_workflow_frames_form_error" data-state="error">

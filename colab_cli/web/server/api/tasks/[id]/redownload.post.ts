@@ -8,7 +8,7 @@ import { findTask } from '../../../services/taskEvents'
 import { sendApiError } from '../../../utils/errors'
 import { sendRunnerError } from '../../../utils/runner'
 import { runnerRequest } from '../../../services/runnerClient'
-import { ensureTaskSubscription } from '../../../services/taskSubscription'
+import { ensureTaskSubscription, stopTaskSubscription } from '../../../services/taskSubscription'
 import { writeAudit } from '../../../utils/audit'
 
 export default defineEventHandler(async (event) => {
@@ -35,7 +35,11 @@ export default defineEventHandler(async (event) => {
   // Runner 侧事件流重新打开（redownloading）：DB 转回 running 并重建订阅，
   // 终态（task.done / task.failed）由订阅链路再次收尾
   const ds = await getDataSource()
-  await ds.getRepository(TaskSchema).update({ id }, { status: 'running', finishedAt: null })
+  stopTaskSubscription(id)
+  await ds.getRepository(TaskSchema).update(
+    { id, status: 'recoverable', lastSeq: task.lastSeq },
+    { status: 'running', currentPhase: 'output.transfer', finishedAt: null, errorCode: null, errorMessage: null },
+  )
   ensureTaskSubscription(id, task.lastSeq)
 
   await writeAudit(event, { action: 'task.redownload', target: id })

@@ -8,6 +8,8 @@ import path from 'node:path'
 import type { WorkflowConfig } from '../entities/WorkflowConfig'
 import { WorkflowConfigSchema } from '../entities/WorkflowConfig'
 import { getDataSource } from '../utils/db'
+import { readWorkflowConfigFile } from './workflowConfigFiles'
+import type { RawWorkflowConfig } from './workflowConfigFiles'
 
 export function repoRoot(): string {
   const config = useRuntimeConfig()
@@ -57,17 +59,6 @@ const IMAGE_CONTENT_TYPES: Record<string, string> = {
   '.gif': 'image/gif',
   '.tif': 'image/tiff',
   '.tiff': 'image/tiff',
-}
-
-interface RawWorkflowConfig {
-  name?: string
-  api_json?: string
-  supported_accelerators?: string[]
-  accelerator_note?: string
-  input_fields?: Record<string, unknown>[]
-  editable_fields?: Record<string, unknown>[]
-  comfy_flags?: string[]
-  models?: Record<string, unknown>[]
 }
 
 export function slugOfConfigFile(filename: string): string {
@@ -158,7 +149,8 @@ async function readWorkflowFiles(slug: string): Promise<{
 } | null> {
   const configPath = configFilePath(slug)
   try {
-    const config = JSON.parse(await fs.readFile(configPath, 'utf-8')) as RawWorkflowConfig
+    const config = await readWorkflowConfigFile(configPath)
+    if (!config) return null
     const apiPath = apiFilePath(configPath, config)
     const api = JSON.parse(await fs.readFile(apiPath, 'utf-8')) as Record<string, unknown>
     return { configPath, config, apiPath, api }
@@ -200,8 +192,9 @@ export async function resolveWorkflowInputImage(
   return resolvedPath ? { path: resolvedPath, filename, contentType } : null
 }
 
-async function buildRow(slug: string, filePath: string): Promise<Omit<WorkflowConfig, 'id'>> {
-  const raw: RawWorkflowConfig = JSON.parse(await fs.readFile(filePath, 'utf-8'))
+async function buildRow(slug: string, filePath: string): Promise<Omit<WorkflowConfig, 'id'> | null> {
+  const raw = await readWorkflowConfigFile(filePath)
+  if (!raw) return null
   const root = repoRoot()
   const apiJsonAbs = raw.api_json
     ? path.resolve(path.dirname(filePath), raw.api_json)
@@ -214,8 +207,8 @@ async function buildRow(slug: string, filePath: string): Promise<Omit<WorkflowCo
   return {
     slug,
     name: String(raw.name ?? slug),
-    configPath: path.relative(root, filePath),
-    apiJsonPath: path.relative(root, apiJsonAbs),
+    configPath: path.relative(root, filePath).split(path.sep).join('/'),
+    apiJsonPath: path.relative(root, apiJsonAbs).split(path.sep).join('/'),
     supportedAccelerators: Array.isArray(raw.supported_accelerators) ? raw.supported_accelerators : [],
     acceleratorNote: raw.accelerator_note ?? null,
     inputFields: (Array.isArray(raw.input_fields) ? raw.input_fields : []) as WorkflowConfig['inputFields'],
@@ -229,6 +222,17 @@ async function buildRow(slug: string, filePath: string): Promise<Omit<WorkflowCo
   }
 }
 
+/** Also hide canvas exports that an older version may have synced into the table. */
+export async function listWorkflowConfigs(): Promise<WorkflowConfig[]> {
+  const ds = await getDataSource()
+  const items = await ds.getRepository(WorkflowConfigSchema).find({ order: { slug: 'ASC' } })
+  const visible = await Promise.all(items.map(async (item) => {
+    const config = await readWorkflowConfigFile(configFilePath(item.slug)).catch(() => undefined)
+    return config === null ? null : item
+  }))
+  return visible.filter((item): item is WorkflowConfig => item !== null)
+}
+
 /** 全量同步（文件 → 表，按 slug upsert；文件消失的 slug 不删，FK 可能仍被引用）。 */
 export async function syncWorkflowConfigs(): Promise<WorkflowConfig[]> {
   const dir = workflowsDir()
@@ -239,13 +243,14 @@ export async function syncWorkflowConfigs(): Promise<WorkflowConfig[]> {
     const slug = slugOfConfigFile(file)
     try {
       const row = await buildRow(slug, path.join(dir, file))
+      if (!row) continue
       const existing = await repo.findOne({ where: { slug } })
       await repo.save(existing ? { ...row, id: existing.id } : row)
     } catch (error) {
       console.warn(`[workflows] 同步 ${file} 失败，已跳过:`, error)
     }
   }
-  return await repo.find({ order: { slug: 'ASC' } })
+  return await listWorkflowConfigs()
 }
 
 /**
@@ -257,13 +262,16 @@ export async function ensureWorkflowConfig(slug: string): Promise<WorkflowConfig
   let mtime: Date
   try {
     mtime = (await fs.stat(filePath)).mtime
+    if (!await readWorkflowConfigFile(filePath)) return null
   } catch {
     return null // 文件不存在：INPUT_NOT_FOUND 语义由调用方按 400 处理
   }
   const ds = await getDataSource()
   const repo = ds.getRepository(WorkflowConfigSchema)
   const existing = await repo.findOne({ where: { slug } })
-  if (!existing || mtime.getTime() > new Date(existing.syncedAt).getTime()) {
+  const configPath = path.relative(repoRoot(), filePath).split(path.sep).join('/')
+  if (!existing || existing.configPath !== configPath
+    || mtime.getTime() > new Date(existing.syncedAt).getTime()) {
     await syncWorkflowConfigs()
   }
   return await repo.findOne({ where: { slug } })
@@ -275,13 +283,23 @@ export async function hydrateEditableFieldDefaults(
 ): Promise<WorkflowConfig & {
   editableFields: EditableWorkflowFieldView[]
   inputImages: WorkflowInputImageView[]
+  optionalLastFrame: boolean
 }> {
+  // 兼容从 Windows 数据库迁移到 Linux 的路径镜像；表单提交统一使用正斜杠。
+  workflow = {
+    ...workflow,
+    configPath: workflow.configPath.replaceAll('\\', '/'),
+    apiJsonPath: workflow.apiJsonPath.replaceAll('\\', '/'),
+  }
   let fields = workflow.editableFields as EditableWorkflowFieldView[]
+  let optionalLastFrame = false
   // GET 不能假设操作员已经手工点过「从文件同步」；直接读取文件声明，
   // POST /tasks 随后仍会通过 ensureWorkflowConfig 把同一声明同步入库。
   try {
     const configPath = path.resolve(repoRoot(), workflow.configPath)
     const raw = JSON.parse(await fs.readFile(configPath, 'utf-8')) as RawWorkflowConfig
+    optionalLastFrame = raw.optional_last_frame === true
+    if (typeof raw.name === 'string') workflow.name = raw.name
     if (Array.isArray(raw.editable_fields)) {
       fields = raw.editable_fields as unknown as EditableWorkflowFieldView[]
     }
@@ -338,8 +356,8 @@ export async function hydrateEditableFieldDefaults(
         seenNodes.add(nodeId)
       }
     }
-    return { ...workflow, editableFields: hydrated, inputImages }
+    return { ...workflow, editableFields: hydrated, inputImages, optionalLastFrame }
   } catch {
-    return { ...workflow, editableFields: fields, inputImages: [] }
+    return { ...workflow, editableFields: fields, inputImages: [], optionalLastFrame }
   }
 }

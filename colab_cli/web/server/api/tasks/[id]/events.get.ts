@@ -9,16 +9,14 @@
 import { getQuery, getRouterParam, setResponseHeaders } from 'h3'
 import { TaskEventSchema } from '../../../entities/TaskEvent'
 import type { TaskEventRow } from '../../../entities/TaskEvent'
-import { TERMINAL_TASK_STATUSES } from '../../../entities/Task'
 import { findTask } from '../../../services/taskEvents'
 import { ensureTaskSubscription, subscribeBrowser } from '../../../services/taskSubscription'
 import { getDataSource } from '../../../utils/db'
 import { sendApiError } from '../../../utils/errors'
+import { createTaskBrowserStream } from '../../../services/taskBrowserStream'
 
-const TERMINAL_PHASE_PATTERN = /"phase":"task\.(done|failed|canceled)"/
-
-function milestoneFrame(row: TaskEventRow): string {
-  const data = JSON.stringify({
+function milestoneEvent(row: TaskEventRow) {
+  return {
     v: 1,
     task_id: row.taskId,
     seq: row.seq,
@@ -27,8 +25,7 @@ function milestoneFrame(row: TaskEventRow): string {
     status: row.status,
     message: row.message,
     data: row.data ?? {},
-  })
-  return `id: ${row.seq}\nevent: task\ndata: ${data}\n\n`
+  }
 }
 
 export default defineEventHandler(async (event) => {
@@ -44,83 +41,24 @@ export default defineEventHandler(async (event) => {
     'X-Accel-Buffering': 'no',
   })
 
-  const encoder = new TextEncoder()
-  const taskId = id
-  let onCancel: (() => void) | null = null
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let closed = false
-      let unsubscribe: (() => void) | null = null
-      // 先挂订阅再回放：两者之间的实时事件进缓冲，回放结束后按 seq 去重补发
-      const buffer: string[] = []
-      let replaying = true
-
-      const close = () => {
-        if (closed) return
-        closed = true
-        unsubscribe?.()
-        try {
-          controller.close()
-        } catch { /* 已关闭 */ }
-      }
-      const push = (frame: string) => {
-        if (closed) return
-        try {
-          controller.enqueue(encoder.encode(frame))
-        } catch {
-          close()
-          return
-        }
-        if (TERMINAL_PHASE_PATTERN.test(frame)) close() // 终态后流关闭（doc/02 §2.5）
-      }
-      unsubscribe = subscribeBrowser(taskId, (frame) => {
-        if (replaying) {
-          buffer.push(frame)
-        } else {
-          push(frame)
-        }
+  const { stream, close } = createTaskBrowserStream({
+    taskId: id,
+    fromSeq,
+    subscribe: push => subscribeBrowser(id, push),
+    loadHistory: async () => {
+      const ds = await getDataSource()
+      const rows = await ds.getRepository(TaskEventSchema).find({
+        where: { taskId: id },
+        order: { seq: 'ASC' },
       })
-
-      const isTerminal = TERMINAL_TASK_STATUSES.includes(task.status)
-      if (!isTerminal) {
-        // 兜底：正常路径下订阅已由受理/启动补拉建立；这里覆盖罕见漏网场景
-        ensureTaskSubscription(taskId)
-      }
-
-      let lastSeq = fromSeq
-      try {
-        const ds = await getDataSource()
-        const rows = await ds.getRepository(TaskEventSchema).find({
-          where: { taskId },
-          order: { seq: 'ASC' },
-        })
-        for (const row of rows) {
-          if (row.seq <= fromSeq) continue
-          lastSeq = Math.max(lastSeq, row.seq)
-          push(milestoneFrame(row))
-        }
-      } catch (error) {
-        console.error(`[task-events] ${taskId} 回放失败:`, error)
-      }
-      replaying = false
-      // 补发缓冲中 seq > 回放水位的帧（seq 从帧文本取，避免整段 JSON.parse）
-      for (const frame of buffer) {
-        const match = frame.match(/"seq":(\d+)/)
-        if (match && Number(match[1]) <= lastSeq) continue
-        push(frame)
-      }
-      buffer.length = 0
-
-      // 回放完成时任务已终态（含回放期间刚好收尾）→ 关闭
-      if (closed) return
-      const fresh = await findTask(taskId).catch(() => null)
-      if (!fresh || TERMINAL_TASK_STATUSES.includes(fresh.status)) close()
-
-      onCancel = close
-      event.node.req.on('close', close) // 浏览器断开：只摘订阅，不动订阅管理器
+      return rows.map(milestoneEvent)
     },
-    cancel() {
-      onCancel?.() // ReadableStream 取消（连接被对端中止）
+    loadTask: async () => {
+      const fresh = await findTask(id)
+      return fresh ? { status: fresh.status, lastSeq: fresh.lastSeq } : null
     },
+    ensureSubscription: () => ensureTaskSubscription(id),
   })
+  event.node.res.once('close', close)
+  return stream
 })

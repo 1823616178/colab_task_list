@@ -50,6 +50,9 @@ def list_workflows() -> list[dict]:
     for path in sorted(workflows_dir.glob("*.json")):
         try:
             config = load_json(path, "工作流配置")
+            # ComfyUI 的画布导出不是 Runner 配置，不能回退到默认 API 图。
+            if isinstance(config.get("nodes"), list):
+                continue
             models = config.get("models") or []
             total_bytes = sum(int(model.get("size_bytes", 0)) for model in models)
             entries.append({
@@ -62,6 +65,7 @@ def list_workflows() -> list[dict]:
                 "accelerator_note": config.get("accelerator_note"),
                 "input_fields": config.get("input_fields", []),
                 "editable_fields": config.get("editable_fields", []),
+                "optional_last_frame": config.get("optional_last_frame") is True,
                 "models": models,
                 "total_model_bytes": total_bytes,
             })

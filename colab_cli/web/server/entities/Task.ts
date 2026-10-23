@@ -16,6 +16,8 @@ export type CancelMode = 'interrupt' | 'destroy'
 // dry_run 是 Runner 的演练通道（不烧计算单元），仅 dry_run 任务出现
 export type TransportMode = 'native' | 'cli' | 'dry_run'
 export type FtpUploadStatus = 'pending' | 'uploading' | 'uploaded' | 'failed'
+/** auto 由后端决定默认策略；download/symlink/copy 为用户显式选择 */
+export type ModelMode = 'auto' | 'download' | 'symlink' | 'copy'
 
 export interface Task {
   /** YYYYMMDD-HHMMSS-<uuid4 前 8 位>，与 Runner 生成的 task_id 一致 */
@@ -30,6 +32,7 @@ export interface Task {
   acceleratorKind: 'gpu' | 'tpu'
   acceleratorSpec: string
   mountDrive: boolean
+  modelMode: ModelMode
   reuse: boolean
   keep: boolean
   timeout: number
@@ -95,6 +98,7 @@ export const TaskSchema = new EntitySchema<Task>({
     acceleratorKind: { type: 'enum', enum: ['gpu', 'tpu'] },
     acceleratorSpec: { type: 'varchar', length: 16 },
     mountDrive: { type: 'boolean', default: true },
+    modelMode: { type: 'varchar', length: 16, default: 'auto' },
     reuse: { type: 'boolean', default: false },
     keep: { type: 'boolean', default: false },
     timeout: { type: 'double', default: 86400 },

@@ -2,8 +2,8 @@
 import { extractApiError, useAuthStore } from '~/stores/auth'
 import { useSessionStore } from '~/stores/session'
 import type { SessionItem } from '~/stores/session'
-import { useTaskStore } from '~/stores/task'
-import type { SubmitTaskPayload } from '~/stores/task'
+import { MODEL_MODE_LABELS, useTaskStore } from '~/stores/task'
+import type { ModelMode, SubmitTaskPayload } from '~/stores/task'
 import { useUiStore } from '~/stores/ui'
 import { useWorkflowStore } from '~/stores/workflow'
 import {
@@ -46,6 +46,7 @@ const backend = ref<ComputeBackend>('colab')
 const acceleratorKind = ref<'gpu' | 'tpu'>('gpu')
 const acceleratorSpec = ref('T4')
 const mountDrive = ref(true)
+const modelMode = ref<ModelMode>('auto')
 const reuse = ref(false)
 const keep = ref(false)
 const timeoutSeconds = ref(86400)
@@ -62,6 +63,7 @@ const workflowImageFailures = ref<Set<string>>(new Set())
 const workflowImagesLoading = ref(false)
 const firstFrameFile = ref<File | null>(null)
 const lastFrameFile = ref<File | null>(null)
+const useLastFrame = ref(false)
 const uploadingFrames = ref(false)
 const frameUploadError = ref('')
 const inputImageFiles = ref<Record<string, File | null>>({})
@@ -79,6 +81,32 @@ interface WorkflowDraftResponse {
   draft: { values: Record<string, string>, updatedAt: string } | null
 }
 
+const MODEL_MODE_OPTIONS: Array<{ value: ModelMode, label: string }> = [
+  { value: 'auto', label: '自动（按后端默认）' },
+  { value: 'download', label: '直接下载到 VM' },
+  { value: 'symlink', label: 'Drive 软链接' },
+  { value: 'copy', label: 'Drive 复制到 VM' },
+]
+
+const modelModeHint = computed(() => {
+  if (modelMode.value === 'download') {
+    return mountDrive.value
+      ? '从 Hugging Face 直接下载到 VM，不读写 Drive 缓存；无下载源的手动模型仍使用 Drive。'
+      : '从 Hugging Face 直接下载到 VM。'
+  }
+  if (modelMode.value === 'symlink') {
+    return mountDrive.value
+      ? '从 Drive 缓存创建软链接，不复制文件；推理加载时直读 Drive，可能较慢。'
+      : '未挂载 Drive 时会自动回退为直接下载。'
+  }
+  if (modelMode.value === 'copy') {
+    return mountDrive.value
+      ? '从 Drive 缓存复制到 VM 本地，推理加载最快；每个新 VM 都会复制一次。'
+      : '未挂载 Drive 时会自动回退为直接下载。'
+  }
+  return '按后端默认策略：Colab 复制到本地，Kaggle/Modal 软链接。'
+})
+
 const workflowDraftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const workflowDraftSaveChains = new Map<string, Promise<boolean>>()
 const workflowDraftVersions = new Map<string, number>()
@@ -93,6 +121,9 @@ const selectedWorkflow = computed(() =>
 const autoAspectEnabled = computed(() =>
   selectedWorkflow.value?.slug === 'minimax_h3'
   || selectedWorkflow.value?.slug === 'minimax_h3_first_frame')
+const activeInputImages = computed(() =>
+  (selectedWorkflow.value?.inputImages ?? []).filter(image =>
+    !selectedWorkflow.value?.optionalLastFrame || useLastFrame.value || image.label !== '尾帧'))
 
 function currentWorkflowDraftContext(): WorkflowDraftContext | null {
   const userId = authStore.user?.id
@@ -390,9 +421,18 @@ watch(() => selectedWorkflow.value?.slug, () => {
   const workflow = selectedWorkflow.value
   firstFrameFile.value = null
   lastFrameFile.value = null
+  useLastFrame.value = false
   inputImageFiles.value = {}
   frameUploadError.value = ''
   void loadWorkflowImages(workflow)
+})
+
+watch(useLastFrame, (enabled) => {
+  if (enabled) return
+  lastFrameFile.value = null
+  for (const image of selectedWorkflow.value?.inputImages ?? []) {
+    if (image.label === '尾帧') inputImageFiles.value[image.nodeId] = null
+  }
 })
 
 async function refreshWorkflowImages(workflow: WorkflowItem) {
@@ -432,7 +472,9 @@ async function uploadFrames() {
 async function uploadInputImages() {
   const workflow = selectedWorkflow.value
   if (!workflow) return
-  const files = Object.entries(inputImageFiles.value).filter((entry): entry is [string, File] => Boolean(entry[1]))
+  const activeIds = new Set(activeInputImages.value.map(image => image.nodeId))
+  const files = Object.entries(inputImageFiles.value).filter((entry): entry is [string, File] =>
+    activeIds.has(entry[0]) && Boolean(entry[1]))
   if (files.length === 0) return
   uploadingFrames.value = true
   frameUploadError.value = ''
@@ -571,6 +613,12 @@ function validate(): string | null {
       return `${field.label}不能为空`
     }
   }
+  for (const image of activeInputImages.value) {
+    const pending = autoAspectEnabled.value
+      ? (image.label === '尾帧' ? lastFrameFile.value : firstFrameFile.value)
+      : inputImageFiles.value[image.nodeId]
+    if (!image.available && !pending) return `请先上传${image.label}`
+  }
   return null
 }
 
@@ -603,10 +651,12 @@ async function onSubmit() {
       accelerator: { kind: acceleratorKind.value, spec: acceleratorSpec.value },
       backend: backend.value,
       mount_drive: mountDrive.value,
+      model_mode: modelMode.value,
       reuse: reuse.value,
       keep: keep.value,
       input_dir: null,
       workflow_overrides: changedWorkflowOverrides(),
+      ...(selectedWorkflow.value?.optionalLastFrame ? { use_last_frame: useLastFrame.value } : {}),
       timeout: timeoutSeconds.value,
       ...(dryRun.value ? { dry_run: true } : {}),
     }
@@ -739,10 +789,24 @@ onMounted(async () => {
                 v-if="selectedWorkflow?.inputImages?.length"
                 class="container_task_create_form_images"
               >
-                <h3 class="container_task_images_header_title">当前输入图片</h3>
+                <h3 class="container_task_images_header_title">输入图片（可上传）</h3>
+                <label
+                  v-if="selectedWorkflow?.optionalLastFrame"
+                  class="container_task_images_toggle_label"
+                >
+                  <input
+                    v-model="useLastFrame"
+                    type="checkbox"
+                    :disabled="submitting || uploadingFrames"
+                  >
+                  <span>启用尾帧</span>
+                </label>
+                <p v-if="selectedWorkflow?.optionalLastFrame" class="container_task_images_upload_hint">
+                  默认仅使用首帧；开启后可上传尾帧来控制结尾画面。
+                </p>
                 <div class="container_task_images_body_grid">
                   <figure
-                    v-for="inputImage in (selectedWorkflow?.inputImages ?? [])"
+                    v-for="inputImage in activeInputImages"
                     :key="inputImage.nodeId"
                     class="container_task_image_body_card"
                   >
@@ -783,7 +847,7 @@ onMounted(async () => {
                   </p>
                   <FrameDropZone v-model="firstFrameFile" label="首帧" />
                   <FrameDropZone
-                    v-if="selectedWorkflow?.inputImages.some(image => image.label === '尾帧')"
+                    v-if="activeInputImages.some(image => image.label === '尾帧')"
                     v-model="lastFrameFile"
                     label="尾帧"
                   />
@@ -1023,6 +1087,22 @@ onMounted(async () => {
                 </label>
               </div>
 
+              <div class="container_task_create_form_modelmode">
+                <label class="container_task_create_form_spec">
+                  <span class="container_task_create_cell_speclabel">模型获取方式</span>
+                  <select v-model="modelMode" name="model-mode">
+                    <option
+                      v-for="option in MODEL_MODE_OPTIONS"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </label>
+                <span class="container_task_create_form_parameterhelp">{{ modelModeHint }}</span>
+              </div>
+
               <label class="container_task_create_form_timeout">
                 <span class="container_task_create_cell_fieldlabel">超时保护（秒）</span>
                 <input v-model.number="timeoutSeconds" type="number" min="1" step="1" required>
@@ -1064,6 +1144,12 @@ onMounted(async () => {
                   <span class="container_task_create_cell_summarylabel">Drive 缓存</span>
                   <span class="container_task_create_cell_summaryval">
                     {{ mountDrive ? '已挂载' : '未挂载' }}
+                  </span>
+                </div>
+                <div class="container_task_create_cell_summaryitem">
+                  <span class="container_task_create_cell_summarylabel">模型获取</span>
+                  <span class="container_task_create_cell_summaryval">
+                    {{ MODEL_MODE_LABELS[modelMode] }}
                   </span>
                 </div>
                 <div class="container_task_create_cell_summaryitem">
@@ -1344,6 +1430,14 @@ onMounted(async () => {
   color: var(--c-text);
 }
 
+.container_task_images_toggle_label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  cursor: pointer;
+}
+
 .container_task_images_body_grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1406,6 +1500,10 @@ onMounted(async () => {
   margin: 0;
   font-size: var(--fs-sm);
   color: var(--c-text-sub);
+}
+
+.container_task_images_toggle_label + .container_task_images_upload_hint {
+  margin-bottom: var(--sp-3);
 }
 
 .container_task_images_upload_button {
@@ -1721,6 +1819,16 @@ onMounted(async () => {
   color: var(--c-brand);
   background: var(--c-surface);
   border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+}
+
+.container_task_create_form_modelmode {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface-sub);
+  border: 1px solid var(--c-border);
   border-radius: var(--r-sm);
 }
 

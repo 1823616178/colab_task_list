@@ -62,6 +62,15 @@ def test_specs_validated_per_backend():
     assert cfg.backend == "kaggle"
 
 
+def test_model_mode_defaults_and_validates():
+    assert TaskConfig(workflow_config=WORKFLOW).model_mode == "auto"
+    cfg = TaskConfig.from_dict({"workflow_config": str(WORKFLOW),
+                                "model_mode": "download"})
+    assert cfg.model_mode == "download"
+    with pytest.raises(ValueError, match="未知模型获取模式"):
+        TaskConfig(workflow_config=WORKFLOW, model_mode="bogus")
+
+
 def test_get_transport_by_backend(monkeypatch):
     monkeypatch.delenv("COMPUTE_BACKEND", raising=False)
     assert isinstance(get_transport("cli"), CliTransport)
@@ -298,3 +307,13 @@ def test_kernel_script_runs_locally(tmp_path, monkeypatch):
     transport.create_session("s", "gpu", "T4")
     code = (transport.build_kernel_dir("s") / "run.py").read_text()
     compile(code, "run.py", "exec")
+
+
+@pytest.mark.parametrize("value", [False, 0, [], {}, "", "bogus"])
+def test_model_mode_rejects_invalid_falsy_values(value):
+    with pytest.raises(ValueError, match="未知模型获取模式"):
+        TaskConfig.from_dict({"workflow_config": str(WORKFLOW), "model_mode": value})
+
+
+def test_model_mode_null_retains_default():
+    assert TaskConfig.from_dict({"workflow_config": str(WORKFLOW), "model_mode": None}).model_mode == "auto"

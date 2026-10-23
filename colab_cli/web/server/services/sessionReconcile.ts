@@ -19,7 +19,10 @@ import type { Session } from '../entities/Session'
 import { TaskSchema, TERMINAL_TASK_STATUSES } from '../entities/Task'
 import { getDataSource } from '../utils/db'
 import { runnerRequest } from './runnerClient'
-import { stopTaskSubscription } from './taskSubscription'
+import { ensureTaskSubscription, stopTaskSubscription } from './taskSubscription'
+import { finalizeTaskFromStoredTerminalEvent } from './taskEvents'
+import { sessionLostResumeStatus, verifyTaskTracking } from './taskTracking'
+import type { RunnerTaskSnapshot } from './taskTracking'
 import {
   planExpiredRecoveries,
   planSessionReconciliation,
@@ -48,11 +51,14 @@ export interface ReconcileSummary {
   orphanedTasks: { taskId: string, sessionName: string }[]
   /** VM 已不存在、由 recoverable 还原成失败/取消的任务 */
   expiredRecoveries: { taskId: string, sessionName: string, status: 'failed' | 'canceled' }[]
+  /** 会话查询误判后，已核实 Runner 仍持有记录并恢复订阅的任务。 */
+  restoredTasks: string[]
 }
 
 export interface ReconcileDeps {
   /** 默认 runnerRequest('/sessions')；测试/演练可注入假快照 */
   fetchRunnerSessions?: () => Promise<RunnerSessionSnapshot[]>
+  fetchRunnerTask?: (taskId: string) => Promise<RunnerTaskSnapshot>
   now?: Date
 }
 
@@ -84,11 +90,41 @@ async function doReconcile(deps: ReconcileDeps): Promise<ReconcileSummary> {
 
   const ds = await getDataSource()
   const sessionRepo = ds.getRepository(SessionSchema)
+  const taskRepo = ds.getRepository(TaskSchema)
+  const fetchTask = deps.fetchRunnerTask
+    ?? ((taskId: string) => runnerRequest<RunnerTaskSnapshot>(`/tasks/${taskId}`))
+  const restoredTasks: string[] = []
+  const lostTasks = await taskRepo.find({
+    where: { status: 'orphaned', errorCode: 'SESSION_LOST' },
+    select: { id: true, sessionName: true, status: true, errorCode: true, lastSeq: true },
+  })
+  for (const task of lostTasks) {
+    const tracking = await verifyTaskTracking(task, fetchTask)
+    const status = sessionLostResumeStatus(task, tracking)
+    if (!status || tracking.kind !== 'tracked') continue
+    const result = await taskRepo.update(
+      { id: task.id, status: 'orphaned', errorCode: 'SESSION_LOST', lastSeq: task.lastSeq },
+      {
+        status,
+        currentPhase: tracking.snapshot.phase,
+        finishedAt: null,
+        errorCode: null,
+        errorMessage: null,
+      },
+    )
+    if (!result.affected) continue
+    // 覆盖终态事件已入库、但旧的失联状态随后覆盖 tasks 行的窗口。
+    const finalized = await finalizeTaskFromStoredTerminalEvent(task.id, task.lastSeq)
+    if (!finalized) ensureTaskSubscription(task.id, task.lastSeq)
+    restoredTasks.push(task.id)
+    console.log(`[session-reconcile] 已核实 Runner 任务 ${task.id}，恢复状态与事件订阅`)
+  }
   const dbRows: SessionRowSnapshot[] = await sessionRepo.find()
-  const activeTasks = toActiveTaskSnapshots(await ds.getRepository(TaskSchema).find({
+  const activeRows = await taskRepo.find({
     where: { status: In(['queued', 'running']) },
-    select: { id: true, sessionName: true, status: true, workflowName: true },
-  }))
+    select: { id: true, sessionName: true, status: true, workflowName: true, lastSeq: true },
+  })
+  const activeTasks = toActiveTaskSnapshots(activeRows)
   const recoverableTasks: RecoverableTaskSnapshot[] = await ds.getRepository(TaskSchema).find({
     where: { status: 'recoverable' },
     select: { id: true, sessionName: true, currentPhase: true },
@@ -110,6 +146,40 @@ async function doReconcile(deps: ReconcileDeps): Promise<ReconcileSummary> {
     runnerSessions, dbRows, activeTasks, latestTerminalBySession, now,
   )
   const expiredRecoveries = planExpiredRecoveries(runnerSessions, dbRows, recoverableTasks)
+
+  // 每轮检查所有在途任务，不依赖 VM 是否存活或 expectedAlive 的上一轮值。
+  // VM 活着不代表 Runner 的执行线程还在；查询失败则继续保留并在下一轮核实。
+  const confirmedOrphans: typeof plan.tasksToOrphan = []
+  const orphanReasons = new Map<string, { errorCode: string, errorMessage: string }>()
+  const protectedSessions = new Set<string>()
+  for (const task of activeRows) {
+    const tracking = await verifyTaskTracking(task, fetchTask)
+    if (tracking.kind === 'missing' || tracking.kind === 'interrupted') {
+      confirmedOrphans.push({ taskId: task.id, sessionName: task.sessionName })
+      orphanReasons.set(task.id, tracking.kind === 'interrupted'
+        ? { errorCode: 'RUNNER_INTERRUPTED', errorMessage: 'Runner 重启后执行监控已中断，远端任务状态待核实；请检查会话及远端产物' }
+        : { errorCode: 'RUNNER_LOST', errorMessage: 'Runner 已无该任务记录，远端任务状态待核实；请检查会话' })
+    } else {
+      protectedSessions.add(task.sessionName)
+      if (tracking.kind === 'tracked') {
+        const runnerTerminal = ['succeeded', 'failed', 'canceled'].includes(tracking.snapshot.status)
+        const finalized = runnerTerminal && tracking.snapshot.last_seq === task.lastSeq && await finalizeTaskFromStoredTerminalEvent(task.id, task.lastSeq)
+        if (!finalized) ensureTaskSubscription(task.id)
+      } else {
+        console.warn(`[session-reconcile] 无法核实 Runner 任务 ${task.id}，保留状态与订阅`)
+      }
+    }
+  }
+  plan.tasksToOrphan = confirmedOrphans
+  // 云端列表与执行记录冲突时保留会话预期，避免一次查询缺项制造失联告警。
+  plan.markGone = plan.markGone.filter(item => !protectedSessions.has(item.name))
+  plan.markStopped = plan.markStopped.filter(name => !protectedSessions.has(name))
+  for (const upsert of plan.upserts) {
+    if (confirmedOrphans.some(item => item.sessionName === upsert.name) && !protectedSessions.has(upsert.name)) {
+      upsert.expectedAlive = false
+      if (!plan.orphanNames.includes(upsert.name)) plan.orphanNames.push(upsert.name)
+    }
+  }
 
   // ── 落库：活会话 upsert（createdAt 仅 insert 时写 = 首次见到的时间，近似 VM 创建时间）──
   for (const upsert of plan.upserts) {
@@ -154,21 +224,20 @@ async function doReconcile(deps: ReconcileDeps): Promise<ReconcileSummary> {
     )
   }
 
-  // ── 波及任务转 orphaned（doc/03 §4 状态机）；先取消 SSE 订阅再落库 ──
+  // ── Runner 已无执行线程接管的失联任务转 orphaned ──
   for (const orphan of plan.tasksToOrphan) {
-    stopTaskSubscription(orphan.taskId)
     // WHERE 限定仍在途：与 SSE 终态回写并发时不覆盖已终态的行
     const result = await ds.getRepository(TaskSchema).update(
       { id: orphan.taskId, status: In(['queued', 'running']) },
       {
         status: 'orphaned',
         finishedAt: now,
-        errorCode: 'SESSION_LOST',
-        errorMessage: `对账发现会话 ${orphan.sessionName} 的 VM 已消失，任务状态不可知`,
+        ...orphanReasons.get(orphan.taskId),
       },
     )
     if (result.affected) {
-      console.warn(`[session-reconcile] 任务 ${orphan.taskId}（${orphan.sessionName}）转 orphaned：VM 已消失`)
+      stopTaskSubscription(orphan.taskId)
+      console.warn(`[session-reconcile] 任务 ${orphan.taskId}（${orphan.sessionName}）转 orphaned：Runner 已无执行线程接管`)
     }
   }
 
@@ -192,6 +261,7 @@ async function doReconcile(deps: ReconcileDeps): Promise<ReconcileSummary> {
     stopped: plan.markStopped,
     orphanedTasks: plan.tasksToOrphan,
     expiredRecoveries,
+    restoredTasks,
   }
   console.log(
     `[session-reconcile] 本轮对账完成: 活 ${summary.alive.length}，孤儿 ${summary.orphans.length}`

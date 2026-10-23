@@ -421,6 +421,9 @@ python colab_cli/run.py --gpu A100
 # 3. 不挂载 Google Drive (纯 VM 临时下载)
 python colab_cli/run.py --gpu L4 --no-mount-drive
 
+# 3.1 显式选择模型获取方式（download | symlink | copy；默认 auto）
+python colab_cli/run.py --gpu L4 --model-mode download
+
 # 4. 调试模式: 跑完不销毁 VM，方便排查
 python colab_cli/run.py --gpu L4 --keep
 
@@ -441,7 +444,7 @@ python colab_cli/run.py --workflow-config colab_cli/workflows/tpu_example.json -
 
 云端 `/content/output` 会在每次推理前重建，因此压缩包只包含当前任务的结果。本地结果按唯一任务编号保存到 `colab_output/<任务编号>/output.zip`，不会覆盖上一次下载。
 
-推理期间的资源监控会在后台每秒采集一次 NVIDIA GPU 使用率，并每 2 秒刷新资源栏。GPU 状态同时显示当前值、最近 30 秒平均值和峰值，避免 ComfyUI 步骤间隙的瞬时 `0%` 造成误判。
+推理期间的资源监控会在后台每秒采集一次 NVIDIA GPU 使用率，交互式终端每 2 秒刷新资源栏，非交互式日志每 5 秒输出服务器状态。GPU 状态同时显示当前值、最近 30 秒平均值和峰值，避免 ComfyUI 步骤间隙的瞬时 `0%` 造成误判。
 
 MiniMax H3 当前只支持 GPU。ComfyUI 的设备管理没有 PyTorch/XLA 后端，MiniMax H3 节点及相关算子也以 CUDA/PyTorch 为目标，因此选择 TPU 会在创建 VM 前被兼容性校验阻止。真正的 TPU 工作流需要单独适配 `torch_xla` 或 JAX、移除 CUDA 专用算子并提供相应执行器；不能只把配置中的支持类型改成 `tpu`。
 
@@ -461,13 +464,34 @@ MiniMax H3 当前只支持 GPU。ComfyUI 的设备管理没有 PyTorch/XLA 后�
 
 无需模型的工作流可将 `models` 设置为空列表。通用安装逻辑无需复制或修改。
 
-### Google Drive 39GB 模型智能缓存机制
-脚本默认已集成 Google Drive 缓存复用逻辑：
-1. **只读检测**：工作流执行器检查 `/content/drive` 是否已挂载且 `MyDrive` 可访问，不主动调用 `drive.mount()`；
-2. **优先读取**：挂载可用时检查 `/content/drive/MyDrive/code/backup/models/` 对应子目录下的模型文件；
-3. **快速链接**：若 Drive 中已有且大小校验通过的模型，自动创建软链接（`os.symlink`）至 ComfyUI 目录；
-4. **自动备份**：若 Drive 中尚未存在该模型，则从 HuggingFace 下载后自动复制保存到 Drive 对应文件夹，下次开机即可秒级复用；
-5. **无认证回退**：复用 VM 时若 Drive 未挂载或不可访问，不弹出认证，直接使用 VM 本地模型或重新下载。
+### Google Drive 模型缓存与 VM 本地加载
+
+Colab 工作流默认优先持久保存到 Google Drive，再使用 VM 本地副本加载模型：
+
+1. **确认挂载**：执行器检查 `/content/drive` 是否真实挂载且 `MyDrive` 可访问，
+   不主动触发认证。通过临时写入确认模型目录可写；只读 Drive 中的已有模型仍能复用。
+2. **直接下载到 Drive**：缺失模型通过 Hugging Face `local_dir` 下载到
+   `MyDrive/code/backup/models/.downloads/<模型标识>/<VM 标识>/`。
+   下载进程的 HF/Xet 缓存也指向该目录，不先在 VM 默认缓存留下完整权重。
+3. **校验后归档**：下载完成后按配置的 `size_bytes` 校验，再将完整文件归档到
+   `MyDrive/code/backup/models/<cache_path>`。中间文件不作为有效模型；同一 VM
+   重试复用下载目录，不同 VM 使用各自的中间目录，VM 内通过本地文件锁避免重复下载。
+4. **按任务选择加载方式**：提交时可指定 `model_mode`（`auto`、`download`、`symlink`、`copy`，默认 `auto`）：
+   - `download`：Hugging Face 直接下载到 VM 本地，不读写 Drive 缓存；无下载源的手动模型仍从 Drive 软链。
+   - `symlink`：Drive 缓存直接软链到 ComfyUI 目录，省磁盘和复制时间，推理时直读挂载盘。
+   - `copy`：Drive 缓存复制到 VM 本地，推理加载最快；本地空间不足时回退 Drive 软链。
+   - `auto`：Colab 使用 `copy`，Modal/Kaggle 沿用各自原有策略（软链接）。
+5. **明确回退**：Drive 未挂载、不可写或出现配额/存储错误时，先确认 VM 剩余空间，
+   再本地下载，并为 ComfyUI/产物保留至少 2 GiB。未声明大小时先查询远端文件大小。
+   网络、仓库权限和下载内容校验失败会直接报错，不换目录重复下载。
+
+以上模式同样支持 Modal Volume 和 Kaggle Dataset，后两者检查映射的模型缓存目录，
+不依赖 Colab 的 Drive 挂载点。`copy` 在所有后端均支持空间不足时回退软链接。
+复用 VM 后选择 `symlink` 会把已有本地副本切换为缓存链接；缓存缺失但可写时，
+直接归档已有完整副本，无需重新下载。缓存不可用时保留已有可用的 VM 文件，
+并在日志中说明回退原因；模式切换失败不会提前删除原模型。
+Web 提交页可选择模型获取方式；CLI 使用 `--model-mode download|symlink|copy`，
+不传时保持 `auto` 原有行为。
 
 ## 可靠性相关环境变量（Runner / colab_core）
 
@@ -481,29 +505,79 @@ MiniMax H3 当前只支持 GPU。ComfyUI 的设备管理没有 PyTorch/XLA 后�
 
 提交任务时请求体可带 `"queue": false`，同会话忙时直接返回 409 而不排队。
 
-## Docker 一键启动（Web + Runner + MySQL）
+Runner 会在工作线程退出时补齐缺失的终态。失败或取消后若保留了 VM，
+同会话的等待任务会以 `SESSION_RECOVERY_REQUIRED` 结束，避免覆盖远端结果；
+处理结果后可停止会话，或明确提交 `reuse=true` 的新任务。成功保留 VM 时，
+仅自动提升明确开启复用的排队任务。保留会话的保护记录以及重启后的
+`interrupted` 记录会持续落盘，直到明确处理，不会在第二次重启时消失。
 
-一条 `docker compose` 同时起三个容器：`web`（Nuxt，映射宿主 3000）、`runner`（Python Runner，**不映射宿主端口**，
-只在 compose 网络里被 web 访问）、`mysql`（8.4，数据存在卷 `mysql_data`）。web 启动时自动跑数据库迁移（含 012/013）。
-Runner 产物卷 `colab_output` 在两个容器里挂在同一路径 `/data/colab_output`。
+`GET /sessions` 的成功快照缓存 5 秒，并合并同时到达的查询。云端列表查询
+超时为 5 秒，仅对云端确认存活的会话并发补查状态（最多 4 路，共 3 秒预算）。
+云端查询失败或无法解析时返回 HTTP 503 / `SESSION_QUERY_FAILED`，客户端应
+保留已有状态；只有有效的云端列表才可用于判断 VM 是否消失。
 
-Windows（Docker Desktop，PowerShell）：
+普通阶段的恢复状态最多每秒合并写入一次，任务受理、启动、终态、重新下载、
+会话交接和服务关闭仍即时保存；事件里程碑继续逐条 fsync。已结束的普通档案
+在内存最多保留 128 个，历史查询与重取结果可从磁盘恢复。SSE 消费积压时会
+真正关闭连接，客户端使用最后已处理的 seq 重连补拉持久化事件。
 
-```powershell
-cd E:\code\colab_task_list\colab_cli
-Copy-Item .env.docker.example .env.docker     # 用记事本填 RUNNER_TOKEN / JWT_SECRET / DB_PASSWORD / DB_ROOT_PASSWORD / ADMIN_PASSWORD
-docker compose --env-file .env.docker up -d --build
-docker compose --env-file .env.docker ps       # 三个服务都应为 healthy
-start http://127.0.0.1:3000
+## Docker 一键启动（Web + Runner，复用已有 MySQL）
+
+Compose 只启动 `web` 和 `runner`，数据库、JWT、管理员及 FTP 配置直接读取
+`web/.env`。先确认 `NUXT_DB_HOST` 是容器能访问的 MySQL 地址：可以填宿主局域网
+IP（如 `192.168.1.25`）或 `host.docker.internal`，不能填容器自身的 `127.0.0.1`。
+MySQL 需允许该数据库用户从 Docker 网络连接。
+
+在 `colab_cli` 目录运行：
+
+```bash
+mkdir -p secrets/colab
+docker compose --env-file web/.env up -d --build
+docker compose --env-file web/.env ps       # web、runner 都应为 healthy
 ```
 
-Linux / macOS 把 `Copy-Item` 换成 `cp`，其余相同。
+Web 宿主端口沿用 `web/.env` 的 `NITRO_PORT`（缺省 `54471`），监听地址沿用
+`NITRO_HOST`（缺省 `127.0.0.1`）。容器内部固定为 `3000`，Runner 无宿主端口。
+例如 `NITRO_PORT=54471` 时访问 `http://127.0.0.1:54471`，Web 账号密码使用
+现有数据库里的账号；`NUXT_ADMIN_*` 只在首次管理员迁移时生效。
 
-- **Colab 登录**：登录态存在 `./secrets/colab`（挂到容器 `/root/.config/colab-cli`，里面是 `token.json`）。首次运行
-  `docker compose --env-file .env.docker exec -it runner colab sessions`，按提示在浏览器打开链接并粘贴授权码，token 会持久化在该目录。
-  已在宿主登录过的，也可以直接把宿主 `~/.config/colab-cli/` 的内容复制进去。
-- **Kaggle / Modal**：在 `.env.docker` 填 `KAGGLE_USERNAME`/`KAGGLE_KEY`、`MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`，并设 `INSTALL_BACKENDS=1` 后重新 `--build`。
-- 局域网访问：`WEB_BIND=0.0.0.0`；走 HTTPS 反代时把 `AUTH_COOKIE_SECURE=true`。
-- 常用：`docker compose --env-file .env.docker logs -f runner`；停止 `down`（加 `-v` 会删除数据库和产物卷，慎用）。
-- Runner 在容器内绑 `0.0.0.0` 需要显式 `COLAB_RUNNER_HOST=0.0.0.0` + `COLAB_RUNNER_ALLOW_NON_LOOPBACK=1`（compose 已设置）；
-  直接 `python -m colab_runner` 时默认仍只绑 127.0.0.1。
+Web 启动时执行未完成的数据库迁移；Compose 默认关闭开发用的
+`NUXT_DB_SYNCHRONIZE` 和数据库 SQL 日志，本地 `web/.env` 不受影响。
+两个容器以 UID/GID 1000 共享 `/data/colab_output` 产物卷，支持读取和清理产物。
+工作流和输入图片通过仓库父目录挂载到 `/srv`，兼容旧版 MiniMax 的
+`../../api.json` 引用；Web 与 Runner 共享修改后的工作流、图片及
+`/data/colab_uploads` 临时上传目录，支持提交任务页上传首尾帧。
+
+**Colab 认证在终端输入**，Web 登录页用于登录控制台账号。首次认证执行：
+
+```bash
+docker compose --env-file web/.env exec runner colab --auth=oauth2 sessions
+```
+
+终端打印 Google 授权链接。在浏览器打开链接，登录 Google 并同意授权，将显示的
+授权码粘贴回终端的 `Enter the authorization code:` 提示，然后回车。
+凭据保存在宿主 `secrets/colab/token.json`，挂载到容器
+`/home/runner/.config/colab-cli/token.json`，重启容器后仍保留。
+该版本 CLI 没有 `colab auth login` 子命令。
+
+已在宿主登录过，可在首次使用前复制凭据：
+
+```bash
+install -m 600 ~/.config/colab-cli/token.json secrets/colab/token.json
+```
+
+`secrets/` 已被 Git 和 Docker 构建上下文忽略。凭据目录须允许 UID 1000 读写，
+以便刷新 OAuth 令牌。
+
+可选配置见 `.env.docker.example`，复制为 `.env.docker` 后，所有命令改用
+`docker compose --env-file web/.env --env-file .env.docker ...`。
+例如 `COLAB_AUTH_DIR` 可指定已有凭据目录，`WEB_PORT` / `WEB_BIND` 可覆盖宿主端口
+和监听地址；HTTP 默认 `AUTH_COOKIE_SECURE=false`，HTTPS 反代时设为 `true`。
+Kaggle / Modal 凭据也写入该文件，并设 `INSTALL_BACKENDS=1` 后重新构建。
+
+若宿主能联网而 Docker 容器不能，在 `.env.docker` 设置容器可访问的
+`DOCKER_HTTP_PROXY`，构建与运行都会使用它；`DOCKER_NO_PROXY` 中加入数据库、FTP
+等内网地址及 `runner`，避免内部服务经过代理。
+
+查看日志：`docker compose --env-file web/.env logs -f`；
+停止：`docker compose --env-file web/.env down`。`down -v` 会删除产物及 Runner 状态卷。

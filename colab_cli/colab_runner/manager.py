@@ -20,19 +20,21 @@
 session 锁，直到 `DELETE /sessions/{name}` 显式解除。
 """
 import json
+import logging
 import os
 import subprocess
 import threading
-from collections import deque
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from colab_core import TaskConfig, TaskError, create_task_id, run_task
+from colab_core import TaskConfig, create_task_id, run_task
 from colab_core import events as ev
+from colab_core.config import MODEL_MODES
 from colab_core.paths import HERE, default_output_root
-from colab_transport import TransportError, get_transport
+from colab_transport import get_transport
 from colab_transport.cli import (
     ColabCli,
     cancel_drive_mount,
@@ -40,7 +42,12 @@ from colab_transport.cli import (
 )
 from colab_transport.transfer import file_sha256
 
+from .sessions import invalidate_sessions
 from .store import EventLog, build_event, read_events_file
+
+logger = logging.getLogger(__name__)
+FINISHED_CACHE_SIZE = 128
+STATE_DEBOUNCE_SECONDS = 1.0
 
 TERMINAL_STATUSES = ("succeeded", "failed", "canceled")
 # redownloading / interrupted 之外的一切在飞状态都占 session 锁
@@ -184,7 +191,11 @@ class TaskManager:
         )
         self._lock = threading.RLock()  # 可重入：submit 持锁 emit 会经回调写 state 文件；护 registry / session map / state 写
         self._records: dict[str, TaskRecord] = {}
-        self._session_owner: dict[str, str] = {}  # session -> task_id（非终态）
+        self._active_ids: set[str] = set()
+        self._finished: OrderedDict[str, None] = OrderedDict()
+        self._state_timer: Optional[threading.Timer] = None
+        self._shutdown = False
+        self._session_owner: dict[str, str] = {}  # 在飞任务或保留 VM 的保护档案
         # session -> 排队中的 task_id（FIFO）。不变式：队列非空 ⇒ 该会话有 owner；
         # owner 释放时由 _release_session 立即把队首提升为 owner 并投入执行。
         self._session_queue: dict[str, deque[str]] = {}
@@ -200,8 +211,13 @@ class TaskManager:
             owner = self._session_owner.get(cfg.session)
             enqueue = False
             if owner is not None:
-                self._check_can_enqueue(cfg, owner, allow_queue)
-                enqueue = True
+                previous = self._records.get(owner)
+                if previous is not None and previous.terminal and cfg.reuse:
+                    # 用户明确复用已保留的 VM；自动排队不享有这个例外。
+                    self._active_ids.discard(owner)
+                else:
+                    self._check_can_enqueue(cfg, owner, allow_queue)
+                    enqueue = True
             task_id = create_task_id()
             out_dir = self.output_root / task_id
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -221,6 +237,7 @@ class TaskManager:
                 task_id, out_dir, on_persisted=self._make_on_persisted(record)
             )
             self._records[task_id] = record
+            self._active_ids.add(task_id)
             position = 0
             if enqueue:
                 queue = self._session_queue.setdefault(cfg.session, deque())
@@ -239,6 +256,7 @@ class TaskManager:
                 {"session": cfg.session,
                  "workflow_config": str(cfg.workflow_config),
                  "dry_run": cfg.dry_run,
+                 "use_last_frame": cfg.use_last_frame,
                  "backend": cfg.backend,
                  "queue_position": position},
             ))
@@ -252,7 +270,7 @@ class TaskManager:
         owner_record = self._records.get(owner)
         if not allow_queue or _queue_max() == 0:
             raise SessionBusyError(f"会话 {cfg.session} 仍有任务运行", busy_detail)
-        if owner_record is None or owner_record.status == "interrupted":
+        if owner_record is None or owner_record.status == "interrupted" or owner_record.terminal:
             # Runner 重启后的对账项：VM 状态未知，不能往后排
             raise SessionBusyError(
                 f"会话 {cfg.session} 有待对账的中断任务，请先在会话页处理", busy_detail)
@@ -266,7 +284,8 @@ class TaskManager:
         # 把旧 VM 变成名称丢失的计费孤儿 —— 必须显式 reuse 才能排在它后面
         predecessor = self._records.get(queue[-1]) if queue else owner_record
         if (predecessor is not None and predecessor.cfg is not None
-                and predecessor.cfg.keep and not cfg.reuse and not cfg.dry_run):
+                and (predecessor.cfg.keep or (predecessor.terminal and predecessor.session_kept))
+                and not cfg.reuse and not cfg.dry_run):
             raise SessionBusyError(
                 f"会话 {cfg.session} 的前序任务会保留 VM，排队任务须开启「复用会话」",
                 busy_detail,
@@ -274,17 +293,24 @@ class TaskManager:
 
     def queue_position(self, record: TaskRecord) -> Optional[int]:
         """排队中的任务返回 1 起的位置；正在运行/未排队返回 None。"""
-        queue = self._session_queue.get(record.session)
-        if not queue or record.task_id not in queue:
-            return None
-        return list(queue).index(record.task_id) + 1
+        with self._lock:
+            queue = self._session_queue.get(record.session)
+            if not queue or record.task_id not in queue:
+                return None
+            return list(queue).index(record.task_id) + 1
 
     def session_queue(self, session: str) -> list[str]:
-        return list(self._session_queue.get(session) or ())
+        with self._lock:
+            return list(self._session_queue.get(session) or ())
 
     def _parse_config(self, payload: dict) -> TaskConfig:
         if not isinstance(payload, dict):
             raise BadTaskConfigError("请求体必须是 JSON 对象")
+        model_mode = payload.get("model_mode")
+        if model_mode is not None and (
+            not isinstance(model_mode, str) or model_mode not in MODEL_MODES
+        ):
+            raise BadTaskConfigError(f"未知模型获取模式: {model_mode!r}")
         anchored = dict(payload)
         for key in ("workflow_config", "api_json", "input_dir"):
             value = anchored.get(key)
@@ -308,13 +334,23 @@ class TaskManager:
         def on_persisted(event: dict) -> None:
             record.last_seq = event["seq"]
             record.current_phase = event["phase"]
+            if event["phase"] in (ev.PHASE_SESSION_CREATE, ev.PHASE_SESSION_REUSE,
+                                  ev.PHASE_SESSION_KEEP):
+                record.session_kept = True
+                invalidate_sessions()
+            elif event["phase"] == ev.PHASE_SESSION_STOP and event["status"] == ev.STATUS_OK:
+                record.session_kept = False
+                invalidate_sessions()
             if event["phase"] == ev.PHASE_TASK_FAILED:
                 record.error = event.get("data") or {}
                 record.session_kept = bool(record.error.get("session_kept"))
             if event["phase"] in ev.TERMINAL_PHASES:
                 record.terminal_phase = event["phase"]
                 record.finished_at = event["ts"]
-            self._sync_state_file()
+            critical = event["phase"] in (
+                ev.PHASE_TASK_QUEUED, ev.PHASE_TASK_START, *ev.TERMINAL_PHASES,
+            )
+            self._sync_state_file(force=critical)
 
         return on_persisted
 
@@ -346,13 +382,11 @@ class TaskManager:
             result = run_task(record.cfg, self._make_core_emit(record))
         except RunnerTaskCanceled:
             pass
-        except (TaskError, TransportError):
-            pass  # task.failed 事件已由 core 发出并经回调记录
         except Exception as error:  # 意外异常：防御性补终态
             unexpected = error
         finally:
-            try:
-                with record.lock:
+            with record.lock:
+                try:
                     if record.cancel_requested and not record.terminal:
                         self._finalize_cancel_locked(record)
                     if record.terminal_phase == ev.PHASE_TASK_DONE:
@@ -368,8 +402,9 @@ class TaskManager:
                         record.status = "failed"
                     elif record.terminal_phase == ev.PHASE_TASK_CANCELED:
                         record.status = "canceled"
-                    elif unexpected is not None:
+                    else:
                         # core 未能发出终态事件（防御）：由 Runner 补发
+                        unexpected = unexpected or RuntimeError("任务线程退出但未产生终态事件")
                         record.event_log.emit(build_event(
                             record.task_id,
                             ev.PHASE_TASK_FAILED,
@@ -378,15 +413,13 @@ class TaskManager:
                             {
                                 "error_type": type(unexpected).__name__,
                                 "message": str(unexpected),
-                                "session_kept": False,
+                                "session_kept": record.session_kept,
                                 "recovery_hint": "",
                             },
                         ))
                         record.status = "failed"
-            finally:
-                self._release_session(record)
-                self._sync_state_file()
-                record.event_log.close()
+                finally:
+                    self._finish_record_locked(record)
 
     # ── 取消 ─────────────────────────────────────────────────
 
@@ -419,9 +452,7 @@ class TaskManager:
                 # 尚未进 run_task：直接置终态，不碰 VM（doc/02 §2.3.2）。
                 # 任务线程稍后被 executor 拾取时看到终态会直接返回。
                 self._finalize_cancel_locked(record)
-                self._release_session(record)
-                self._sync_state_file()
-                record.event_log.close()
+                self._finish_record_locked(record)
                 return "canceled"
         # running：守护线程下发取消指令（restart-kernel / stop），
         # 任务线程在 sink 下一次 emit 或阻塞返回后收尾。
@@ -491,9 +522,9 @@ class TaskManager:
 
     def redownload(self, task_id: str) -> TaskRecord:
         record = self._ensure_live_record(task_id)
-        # 终态任务：self._lock → record.lock 安全（_execute 已退出；cancel 对终态直接 409）
-        with self._lock:
-            with record.lock:
+        # 所有路径统一 record.lock → manager._lock，等待旧 worker 完成收尾。
+        with record.lock:
+            with self._lock:
                 if not record.recoverable:
                     raise RedownloadNotAllowedError(
                         "仅当任务失败/取消且会话被保留（recoverable）时才允许重取结果",
@@ -512,11 +543,20 @@ class TaskManager:
                     )
                 record.status = "redownloading"
                 record.terminal_phase = None  # redownload 事件流重新打开
+                record.finished_at = None
+                record.error = None
                 # 复位取消标志：否则 core_emit 会吞掉 redownload 的全部事件
                 # （sink 在 cancel_requested 下对非终态 emit 抛 RunnerTaskCanceled）
                 record.cancel_requested = False
                 self._ensure_event_log(record)
                 self._session_owner[record.session] = record.task_id
+                self._active_ids.add(record.task_id)
+                self._finished.pop(record.task_id, None)
+            record.event_log.emit(build_event(
+                task_id, ev.PHASE_OUTPUT_TRANSFER, ev.STATUS_START,
+                "开始重新下载结果", {"redownload": True, "session": record.session},
+            ))
+            self._sync_state_file()
         self._executor.submit(self._execute_redownload, record)
         return record
 
@@ -528,6 +568,10 @@ class TaskManager:
             emitter.emit(phase, status, message or "", data)
 
         output_zip = record.out_dir / "output.zip"
+        failure = None
+        transport = None
+        size_bytes = None
+        sha256 = None
         try:
             backend = record.backend or (record.cfg.backend if record.cfg else None)
             transport = get_transport(None, sink, backend=backend)
@@ -535,45 +579,43 @@ class TaskManager:
             size_bytes = output_zip.stat().st_size
             sha256 = file_sha256(output_zip)
             emitter.emit(
-                ev.PHASE_OUTPUT_TRANSFER,
-                ev.STATUS_OK,
+                ev.PHASE_OUTPUT_TRANSFER, ev.STATUS_OK,
                 f"结果已下载到: {output_zip}",
                 {"local_path": str(output_zip), "size_bytes": size_bytes,
                  "sha256": sha256, "verified": True},
             )
-            emitter.emit(
-                ev.PHASE_TASK_DONE,
-                ev.STATUS_OK,
-                "",
-                {"task_id": record.task_id, "output_zip": str(output_zip),
-                 "size_bytes": size_bytes, "sha256": sha256,
-                 "session_kept": True, "transport": transport.mode,
-                 "redownload": True},
-            )
-            with record.lock:
-                record.output_zip = output_zip
-                record.output_size_bytes = size_bytes
-                record.output_sha256 = sha256
-                record.transport_mode = transport.mode
-                record.session_kept = True
-                record.error = None
-                record.status = "succeeded"
         except Exception as error:
-            emitter.emit(
-                ev.PHASE_TASK_FAILED,
-                ev.STATUS_ERROR,
-                "",
-                {"error_type": type(error).__name__, "message": str(error),
-                 "session_kept": True,
-                 "recovery_hint": "POST /tasks/{id}/redownload"},
-            )
-            with record.lock:
-                record.status = "failed"  # 仍是 recoverable
+            failure = error
         finally:
-            self._release_session(record)
-            self._sync_state_file()
-            if record.event_log is not None:
-                record.event_log.close()
+            with record.lock:
+                try:
+                    if record.cancel_requested:
+                        self._finalize_cancel_locked(record)
+                    elif failure is not None:
+                        record.event_log.emit(build_event(
+                            record.task_id, ev.PHASE_TASK_FAILED, ev.STATUS_ERROR,
+                            "", {"error_type": type(failure).__name__,
+                                 "message": str(failure), "session_kept": True,
+                                 "recovery_hint": "POST /tasks/{id}/redownload"},
+                        ))
+                        record.status = "failed"
+                    else:
+                        record.event_log.emit(build_event(
+                            record.task_id, ev.PHASE_TASK_DONE, ev.STATUS_OK,
+                            "", {"task_id": record.task_id, "output_zip": str(output_zip),
+                                 "size_bytes": size_bytes, "sha256": sha256,
+                                 "session_kept": True, "transport": transport.mode,
+                                 "redownload": True},
+                        ))
+                        record.output_zip = output_zip
+                        record.output_size_bytes = size_bytes
+                        record.output_sha256 = sha256
+                        record.transport_mode = transport.mode
+                        record.session_kept = True
+                        record.error = None
+                        record.status = "succeeded"
+                finally:
+                    self._finish_record_locked(record)
 
     # ── 查询 ─────────────────────────────────────────────────
 
@@ -595,10 +637,11 @@ class TaskManager:
         return self._session_owner.get(session)
 
     def running_count(self) -> int:
-        return sum(
-            1 for record in self._records.values()
-            if record.status in ("queued", "running", "redownloading")
-        )
+        with self._lock:
+            return sum(
+                1 for record in self._records.values()
+                if record.status in ("queued", "running", "redownloading")
+            )
 
     def snapshot(self, record: TaskRecord) -> dict:
         output = None
@@ -649,12 +692,15 @@ class TaskManager:
         disk = self._record_from_disk(task_id)
         if disk is None:
             raise TaskNotFoundError(f"任务不存在: {task_id}")
+        if not disk.recoverable:
+            return disk  # 被拒绝的历史重取请求不应累积档案或打开文件句柄
         with self._lock:
             existing = self._records.get(task_id)
             if existing is not None:
                 return existing
-            self._ensure_event_log(disk)
             self._records[task_id] = disk
+            if disk.terminal:
+                self._remember_finished(disk)
             return disk
 
     def _record_from_disk(self, task_id: str) -> Optional[TaskRecord]:
@@ -675,6 +721,12 @@ class TaskManager:
             (e for e in reversed(events) if e["phase"] in ev.TERMINAL_PHASES),
             None,
         )
+        retry_start = next((e for e in reversed(events)
+                            if e["phase"] == ev.PHASE_OUTPUT_TRANSFER
+                            and e["status"] == ev.STATUS_START
+                            and (e.get("data") or {}).get("redownload")), None)
+        if retry_start and terminal and retry_start["seq"] > terminal["seq"]:
+            terminal = None
         if terminal is None:
             record.status = "interrupted"  # 无终态：Runner 死在了任务中途
         else:
@@ -686,6 +738,8 @@ class TaskManager:
                 ev.PHASE_TASK_CANCELED: "canceled",
             }[terminal["phase"]]
             data = terminal.get("data") or {}
+            record.duration_ms = data.get("duration_ms")
+            record.transport_mode = data.get("transport")
             if terminal["phase"] == ev.PHASE_TASK_DONE:
                 output = data.get("output_zip")
                 if output:
@@ -699,10 +753,14 @@ class TaskManager:
             elif terminal["phase"] == ev.PHASE_TASK_CANCELED:
                 record.session_kept = bool(data.get("session_kept"))
                 record.cancel_mode = data.get("mode")
-        for event in reversed(events):
-            if event["phase"] not in ev.TERMINAL_PHASES:
-                record.current_phase = event["phase"]
-                break
+        record.current_phase = events[-1]["phase"]
+        for event in events:
+            if event["phase"] == ev.PHASE_TASK_START and record.started_at is None:
+                record.started_at = event.get("ts")
+            if (event["phase"] == ev.PHASE_SESSION_STOP
+                    and event["status"] == ev.STATUS_OK
+                    and (terminal is None or event["seq"] > terminal["seq"])):
+                record.session_kept = False
         # session 可能只出现在 task.queued / task.start / task.canceled，
         # 不能只看最后一条非终态（output.transfer 通常不带 session）
         for event in reversed(events):
@@ -740,52 +798,147 @@ class TaskManager:
                 last_seq=info.get("last_seq", -1),
                 recovered=True,
             )
+            disk = self._record_from_disk(task_id)
+            if disk is not None and disk.terminal and disk.last_seq >= record.last_seq:
+                record = disk
+                # durable terminal wins over a stale running state snapshot.
+                if not record.session_kept or info.get("owns_session") is False:
+                    continue
             self._records[task_id] = record
+            self._active_ids.add(task_id)
+            if record.session and info.get("owns_session", True):
+                self._session_owner.setdefault(record.session, task_id)
+            if record.status == "interrupted":
+                self.recovered_inflight.append(task_id)
+        # 旧版状态没有 owns_session；同会话的所有 interrupted 记录仍需保护。
+        for task_id in self.recovered_inflight:
+            record = self._records[task_id]
             if record.session:
                 self._session_owner.setdefault(record.session, task_id)
-            self.recovered_inflight.append(task_id)
 
     def release_recovered_session(self, session: str) -> None:
-        """DELETE /sessions 后解除该会话上的对账锁（VM 已确认停止）。"""
+        """VM 已确认停止：解除全部中断档案及保留 VM 的会话保护。"""
         with self._lock:
-            task_id = self._session_owner.get(session)
-            if task_id is None:
-                return
-            record = self._records.get(task_id)
-            if record is not None and record.status == "interrupted":
-                self._session_owner.pop(session, None)
-                if task_id in self.recovered_inflight:
-                    self.recovered_inflight.remove(task_id)
+            records = [record for record in self._records.values()
+                       if record.session == session
+                       and (record.status == "interrupted" or record.terminal)]
+        for record in records:
+            with record.lock:
+                # 等锁期间可能已开始 redownload，不能解除新任务的所有权。
+                if record.status != "interrupted" and not record.terminal:
+                    continue
+                record.session_kept = False
+                if record.status == "interrupted":
+                    self._ensure_event_log(record)
+                    record.event_log.emit(build_event(
+                        record.task_id, ev.PHASE_TASK_FAILED, ev.STATUS_ERROR,
+                        "中断任务的会话已停止", {"error_type": "RUNNER_INTERRUPTED",
+                        "message": "Runner 重启中断，关联会话已明确停止", "session_kept": False},
+                    ))
+                    record.status = "failed"
+                elif record.event_log is not None or record.out_dir.exists():
+                    # 保留已有终态，补充会话已停止事实，磁盘水合亦可恢复。
+                    self._ensure_event_log(record)
+                    record.event_log.emit(build_event(
+                        record.task_id, ev.PHASE_SESSION_STOP, ev.STATUS_OK,
+                        "会话已明确停止", {"session": session},
+                    ))
+                with self._lock:
+                    if self._session_owner.get(session) == record.task_id:
+                        self._session_owner.pop(session, None)
+                    self._active_ids.discard(record.task_id)
+                    if record.task_id in self.recovered_inflight:
+                        self.recovered_inflight.remove(record.task_id)
+                if record.event_log is not None:
+                    record.event_log.close()
+                self._remember_finished(record)
         self._sync_state_file()
 
     def _release_session(self, record: TaskRecord) -> None:
-        """释放会话：owner 释放后把队首（跳过已取消的）提升为 owner 并投入执行；
-        排队中被取消的任务只从队列移除。"""
-        promoted: Optional[TaskRecord] = None
+        """只在前序 VM 状态允许时提升排队任务；保留恢复现场时阻止自动继续。"""
+        promoted = None
+        blocked = []
         with self._lock:
             queue = self._session_queue.get(record.session)
             if queue and record.task_id in queue:
                 queue.remove(record.task_id)
             if self._session_owner.get(record.session) == record.task_id:
-                self._session_owner.pop(record.session, None)
+                retained = record.session_kept and not (record.cfg and record.cfg.dry_run)
+                if not retained:
+                    self._session_owner.pop(record.session, None)
                 while queue:
                     candidate = self._records.get(queue.popleft())
                     if candidate is None or candidate.terminal:
+                        continue
+                    unsafe = retained and (
+                        record.status != "succeeded" or not candidate.cfg.reuse
+                    )
+                    if unsafe:
+                        blocked.append(candidate)
                         continue
                     self._session_owner[record.session] = candidate.task_id
                     promoted = candidate
                     break
             if queue is not None and not queue:
                 self._session_queue.pop(record.session, None)
+        for candidate in blocked:
+            with candidate.lock:
+                if candidate.terminal:
+                    continue
+                candidate.event_log.emit(build_event(
+                    candidate.task_id, ev.PHASE_TASK_FAILED, ev.STATUS_ERROR,
+                    "前序任务保留了 VM，已停止自动排队执行，请先处理该会话",
+                    {"error_type": "SESSION_RECOVERY_REQUIRED", "session_kept": False,
+                     "message": "前序任务保留了 VM，请先重取结果、停止会话或明确提交复用任务"},
+                ))
+                candidate.status = "failed"
+                candidate.event_log.close()
+                with self._lock:
+                    self._active_ids.discard(candidate.task_id)
+                self._remember_finished(candidate)
         if promoted is not None:
             self._executor.submit(self._execute, promoted)
 
-    def _sync_state_file(self) -> None:
-        """重写 runner_state.json（原子 tmp+replace+fsync）；只记在飞任务。"""
+    def _finish_record_locked(self, record: TaskRecord) -> None:
+        """调用方持 record.lock：终态、会话交接和日志关闭组成同一次收尾。"""
+        self._release_session(record)
+        if record.event_log is not None:
+            record.event_log.close()
         with self._lock:
+            if self._session_owner.get(record.session) != record.task_id:
+                self._active_ids.discard(record.task_id)
+        self._sync_state_file()
+        self._remember_finished(record)
+        invalidate_sessions()
+
+    def _remember_finished(self, record: TaskRecord) -> None:
+        """仅保留有限个已收尾档案；会话保护和在飞任务不参与淘汰。"""
+        with self._lock:
+            self._finished[record.task_id] = None
+            self._finished.move_to_end(record.task_id)
+            eligible = [task_id for task_id in self._finished
+                        if task_id not in self._active_ids]
+            for task_id in eligible[:-FINISHED_CACHE_SIZE] if FINISHED_CACHE_SIZE else eligible:
+                self._finished.pop(task_id, None)
+                self._records.pop(task_id, None)
+
+    def _sync_state_file(self, force: bool = True) -> None:
+        """关键转换即时持久化；普通阶段最多每秒合并写一次。"""
+        with self._lock:
+            if not force:
+                if self._state_timer is None and not self._shutdown:
+                    self._state_timer = threading.Timer(
+                        STATE_DEBOUNCE_SECONDS, self._sync_state_file)
+                    self._state_timer.daemon = True
+                    self._state_timer.start()
+                return
+            if self._state_timer is not None:
+                self._state_timer.cancel()
+                self._state_timer = None
             tasks = {}
-            for record in self._records.values():
-                if record.status not in ("queued", "running", "redownloading"):
+            for task_id in self._active_ids:
+                record = self._records.get(task_id)
+                if record is None:
                     continue
                 tasks[record.task_id] = {
                     "session": record.session,
@@ -793,21 +946,28 @@ class TaskManager:
                     "started_at": record.started_at,
                     "last_seq": record.last_seq,
                     "phase": record.current_phase,
+                    "status": record.status,
+                    "session_kept": record.session_kept,
+                    "owns_session": self._session_owner.get(record.session) == task_id,
                 }
             payload = json.dumps({"tasks": tasks}, ensure_ascii=False, indent=2)
             temp_path = self.state_path.with_name(
                 f"{self.state_path.stem}.{os.getpid()}.tmp")
             try:
+                self.state_path.parent.mkdir(parents=True, exist_ok=True)
                 temp_path.write_text(payload, encoding="utf-8")
                 with temp_path.open("rb") as file:
                     os.fsync(file.fileno())
                 os.replace(temp_path, self.state_path)
             except OSError:
-                pass  # 状态文件只是崩溃恢复辅助，写失败不影响任务本身
+                logger.exception("无法写入 Runner 恢复状态: %s", self.state_path)
 
     # ── 生命周期 ─────────────────────────────────────────────
 
     def shutdown(self) -> None:
         # 不等待任务线程（可能跑 24 小时）；在飞任务留在 runner_state.json，
         # 由下次启动的 recover() 标记为待对账。
+        with self._lock:
+            self._shutdown = True
+            self._sync_state_file()
         self._executor.shutdown(wait=False, cancel_futures=True)

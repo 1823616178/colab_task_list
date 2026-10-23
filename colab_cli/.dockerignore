@@ -8,5 +8,7 @@ colab_output/
 colab_output_dev/
 logs/
 runner_state.json
+secrets/
+.git/
 *.zip
 yarn.lock
