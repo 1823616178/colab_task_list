@@ -30,6 +30,30 @@ TASK_DIRECTORY = SOURCE_DIRECTORY
 CODEGEN_JOB_FILE = "codegen-job.json"
 STAGING_MARKER = "dataset-metadata.json"
 
+# 打包数据集时排除的路径(按 basename 匹配, 每层目录都生效)。
+# 原先只排除了 __pycache__/.pytest_cache/.git/*.pyc, .env、虚拟环境、
+# 密钥文件、runs/ 产物都会被原样上传; 现在默认排除, 再加一道事后扫描兜底。
+DATASET_IGNORE_PATTERNS = (
+    "__pycache__", ".pytest_cache", ".git", "*.pyc",
+    ".env", ".env.*", ".venv", "venv", "node_modules",
+    ".kaggle", "runs", "*.pem", "*.key", "*.crt", "*.p12",
+    ".mypy_cache", ".ruff_cache",
+)
+# 事后扫描时一旦在 staging 里发现这些名字, 直接中止上传。
+SENSITIVE_BASENAMES = {".env", "kaggle.json", ".kaggle"}
+SENSITIVE_SUFFIXES = (".pem", ".key", ".p12")
+
+
+def find_sensitive_files(staging: Path) -> list[Path]:
+    """扫描 staging 目录, 返回疑似敏感文件(排除规则漏网时的最后一道防线)。"""
+    found = []
+    for path in sorted(staging.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.name in SENSITIVE_BASENAMES or path.suffix in SENSITIVE_SUFFIXES:
+            found.append(path)
+    return found
+
 # 三个任务: repo 是仓库改造，spec/codegen 是固定场景示例。
 TASKS = {
     "repo": ("repo-codegen", TASK_DIRECTORY / "repo_task.py"),
@@ -182,7 +206,9 @@ def command_local(args: argparse.Namespace) -> int:
         return 1
     print(f"任务: {task_file.name}")
     print(f"模型: {environment['LLM_DEFAULT']}")
-    print(f"产物: {work_directory}\n")
+    print(f"产物: {work_directory}")
+    print("注意: kcloud local 直连模型代理, 不经过 kllm 网关账本, "
+          "这次调用不会出现在 kllm usage 里, 真实额度以 Kaggle 平台为准。\n")
     if getattr(args, "executor", "local") == "modal":
         from .modal_exec import run_in_modal
 
@@ -193,11 +219,20 @@ def command_local(args: argparse.Namespace) -> int:
             task_file, forwarded, work_directory,
             repo=Path(args.repo).resolve() if args.repo else None,
             gpu=getattr(args, "modal_gpu", None),
+            timeout=SETTINGS.modal_timeout_seconds,
         )
     else:
-        exit_code = subprocess.run(
-            [sys.executable, str(task_file)], env=environment, cwd=work_directory
-        ).returncode
+        # 原先本机执行没有总超时, 任务本身可以无限跑; 现在默认 3600 秒,
+        # 可用 KCLOUD_LOCAL_TIMEOUT 调整, 0 表示不限制。
+        try:
+            exit_code = subprocess.run(
+                [sys.executable, str(task_file)], env=environment, cwd=work_directory,
+                timeout=SETTINGS.local_timeout_seconds or None,
+            ).returncode
+        except subprocess.TimeoutExpired:
+            print(f"kcloud local 超过 {SETTINGS.local_timeout_seconds} 秒未结束, 已终止。",
+                  file=sys.stderr)
+            exit_code = 124
     if work_directory.is_relative_to(RUNS_DIRECTORY.resolve()):
         mark_latest(RUNS_DIRECTORY, "local", work_directory)
     report_diff(work_directory)
@@ -288,8 +323,15 @@ def command_dataset(args: argparse.Namespace) -> int:
     shutil.copytree(
         repository,
         staging / repository.name,
-        ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", ".git", "*.pyc"),
+        ignore=shutil.ignore_patterns(*DATASET_IGNORE_PATTERNS),
     )
+    sensitive = find_sensitive_files(staging)
+    if sensitive:
+        print("staging 里发现疑似敏感文件, 已中止上传, 请先从仓库里移除它们:",
+              file=sys.stderr)
+        for path in sensitive:
+            print(f"  {path.relative_to(staging)}", file=sys.stderr)
+        return 1
     (staging / "dataset-metadata.json").write_text(
         json.dumps({"title": slug, "id": f"{owner}/{slug}", "licenses": [{"name": "CC0-1.0"}]},
                    indent=2)
@@ -307,6 +349,8 @@ def command_dataset(args: argparse.Namespace) -> int:
         print(f"[dry-run] 已在 {staging} 准备好数据集 {owner}/{slug}, 未上传。")
         return 0
     print(f"⚠ 这会把 {repository} 的内容上传到 Kaggle(私有数据集 {owner}/{slug})。")
+    print("  注: Kaggle 新数据集默认私有(kaggle 2.2.4 dataset_create_new public=False), "
+          "本命令不传 --public; 即便如此, 上传前请先用 --dry-run 检查 staging 内容。")
     if not confirm("确认上传?", args.yes):
         print("已取消。")
         return 1

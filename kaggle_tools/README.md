@@ -51,22 +51,28 @@ Kaggle 认证：`kaggle auth login`（或把 `access_token` / `kaggle.json` 放�
 | `KLLM_BUDGET_WARN_RATIO` | `0.8` | 达到上限这个比例时告警 |
 | `KLLM_TIMEZONE` | `Asia/Shanghai` | "今天/本月"按哪个时区切分 |
 | `KLLM_MAX_CONCURRENCY` | `4` | 同时转发给上游的请求数，多出的排队 |
+| `KLLM_QUEUE_TIMEOUT` | `30` | 排队等待并发槽位的最长秒数，超时返回 503 |
+| `KLLM_MAX_TOTAL_ATTEMPTS` | `8` | 一次请求在“重试 + 换备用模型”全链路上的总尝试上限，`0` 表示不限制 |
+| `KLLM_MAX_REQUEST_BYTES` | `10000000` | 单个网关请求体的最大字节数，超出返回 413 |
 | `KLLM_FALLBACK_MODELS` | 空 | 备用模型（逗号分隔），首选模型 429/5xx/网络失败时依次尝试 |
 | `KLLM_LOG_LEVEL` / `KLLM_LOG_FILE` | `INFO` / 空 | 日志级别、可选日志文件 |
 | `KCLOUD_DEFAULT_MODEL` | `anthropic/claude-sonnet-5@default` | kcloud 默认模型 |
 | `KCLOUD_RUNS_DIR` | `./runs` | kcloud 产物目录 |
 | `KCLOUD_RUN_WAIT` / `KCLOUD_PUSH_WAIT` | `900` / `600` | 云端等待秒数 |
+| `KCLOUD_LOCAL_TIMEOUT` / `KCLOUD_MODAL_TIMEOUT` | `3600` / `3600` | kcloud local 本机执行 / Modal 执行的总超时（秒），`0` 表示不限制 |
 | `KAGGLE_CLI_TIMEOUT` | `1800` | 单条 kaggle 命令的超时 |
 
 ## kllm：本地网关
 
 ```bash
-kllm doctor                    # 自检：拿凭据 + 真调一次模型
+kllm doctor                    # 自检：拿凭据 + 真调一次模型（401/403 时续期重试一次，成功调用记账）
 kllm serve                     # 启动网关（非本机地址必须设 KLLM_LOCAL_KEY，或显式 --insecure）
-kllm models                    # 可用模型
-kllm models --check            # 逐个真实调用检查可用性（消耗少量额度）
+kllm models                    # 可用模型（附上次真实检查的时间，静态列表可能过期）
+kllm models --check            # 并行真实调用检查可用性（消耗少量额度，成功调用记账，单次超时 60 秒）
 kllm ask "写个快排" -m anthropic/claude-sonnet-5@default
 kllm usage                     # 本地估算的今日/本月用量与余额（按 KLLM_TIMEZONE 切分）
+kllm usage --by-model          # 按模型分列今日/本月花费
+kllm usage --archive-before 2026-01   # 把 2026-01 之前的记录归档到 usage-archive.jsonl
 ```
 
 客户端配置：Base URL `http://127.0.0.1:8799/v1`，API Key 随便填（设置了 `KLLM_LOCAL_KEY` 就填那个值），模型名用 `kllm models` 里的原样字符串。
@@ -80,7 +86,7 @@ $env:OPENAI_BASE_URL="http://127.0.0.1:8799/v1"; $env:OPENAI_API_KEY="unused"   
 
 网关行为：
 
-- **额度**：达到 `KLLM_DAILY_LIMIT` / `KLLM_MONTHLY_LIMIT` 后返回 429（`type: budget_exceeded`）；达到 80% 时记告警日志，并加 `X-KLLM-Budget-Warning` 响应头。每个响应都带 `X-KLLM-Budget`。`GET /v1/usage` 返回今日/本月用量。
+- **额度**：达到 `KLLM_DAILY_LIMIT` / `KLLM_MONTHLY_LIMIT` 后返回 429（`type: budget_exceeded`）；达到 80% 时记告警日志，并加 `X-KLLM-Budget-Warning` 响应头。每个响应都带 `X-KLLM-Budget`。`GET /v1/usage` 返回今日/本月用量及按模型分的花费。注意账本口径：只统计经网关、`kllm ask`、`kllm doctor`、`kllm models --check` 的调用；`kcloud local` / Modal 直连代理的调用不在此账本，真实额度以 Kaggle 平台为准。网关先占并发槽位再查额度，排队请求在真正发往上游前会再查一次，避免排队放大超支。
 - **重试**：token 失效（401/403）时续期后重试一次；429/503 和连接失败按退避重试；500/502 和读超时默认不重试（避免重复扣费）；网络失败最终返回 502。
 - **备用模型**：设置了 `KLLM_FALLBACK_MODELS` 时，首选模型失败会依次换备用模型，实际使用的模型见 `X-KLLM-Model`。
 - **流式**：上游中途断开时补发一个 SSE `error` 事件和 `data: [DONE]`，账本记为 `incomplete`。
@@ -90,10 +96,10 @@ $env:OPENAI_BASE_URL="http://127.0.0.1:8799/v1"; $env:OPENAI_API_KEY="unused"   
 ## kcloud：云端代码生成
 
 ```bash
-kcloud local -r examples/example_repo                        # 1. 本地试跑（只花模型额度），push 前必做
+kcloud local -r examples/example_repo                        # 1. 本地试跑（只花模型额度），push 前必做；默认总超时 3600 秒
 # kcloud local --executor modal -r examples/example_repo     #    同上，但在 Modal Sandbox 里隔离执行（见 ../docs/MODAL.md）
 kcloud dataset -r examples/example_repo --dry-run            # 2. 先预览要上传什么
-kcloud dataset -r examples/example_repo -y                   #    上传为私有数据集
+kcloud dataset -r examples/example_repo -y                   #    上传为私有数据集（新数据集默认私有；.env/.venv/密钥/runs 默认排除，staging 里发现敏感文件会直接中止）
 kcloud push -d <用户名>/example-repo -y                       # 3. 推任务（⚠ 永久，无法删除）
 kcloud run                                                   # 4. 云端运行
 kcloud status | kcloud log | kcloud download                 # 5. 看结果，下载 changes.diff

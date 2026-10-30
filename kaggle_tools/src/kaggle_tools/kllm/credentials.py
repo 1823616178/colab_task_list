@@ -178,7 +178,7 @@ class TokenManager:
             return None
 
     def _save_to_disk(self, credentials: ProxyCredentials) -> None:
-        """把凭据写入缓存文件; POSIX 上权限 600, 失败只告警不影响主流程。"""
+        """把凭据写入缓存文件; POSIX 上权限 600, Windows 上尽力收紧 ACL, 失败只告警。"""
         path = self._settings.credentials_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,6 +186,7 @@ class TokenManager:
             temporary_path.write_text(json.dumps(credentials.to_dict()), encoding="utf-8")
             restrict_permissions(temporary_path)
             temporary_path.replace(path)
+            restrict_permissions(path)
         except OSError as error:
             logger.warning("写凭据缓存 %s 失败(不影响本次使用): %s", path, error)
 
@@ -193,8 +194,22 @@ class TokenManager:
 def restrict_permissions(path: Path) -> None:
     """把文件权限收紧到仅本人可读写。
 
-    Windows 上 os.chmod 只能切换只读位, 设 0o600 没有意义; 用户目录本身已按账户隔离。
+    POSIX 上设 0o600。Windows 上 os.chmod 只能切换只读位, 这里尽力用
+    icacls 断开继承并只授权当前用户, 失败只告警——Windows 上不要把
+    ~/.cache/kllm 当成强隔离, 共享机器上用完建议手动删除缓存。
     """
     if os.name == "nt":
+        try:
+            import subprocess
+
+            user = os.environ.get("USERNAME", "")
+            if not user:
+                return
+            subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                capture_output=True, timeout=30, check=False,
+            )
+        except Exception as error:  # noqa: BLE001 - 权限收紧失败只告警
+            logger.warning("收紧凭据缓存权限失败(Windows): %s", error)
         return
     os.chmod(path, 0o600)

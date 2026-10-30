@@ -80,7 +80,16 @@ def locate_repository() -> Path:
     if kaggle_input.is_dir():
         # Kaggle CLI 的 dataset --dir-mode zip 会把仓库目录上传成同名 ZIP。
         # 解到 /tmp，避免输入副本混进 /kaggle/working 的下载产物。
-        for archive in sorted(kaggle_input.rglob(f"{REPO_NAME}.zip")):
+        # 原先多个同名 zip/目录时静默取排序第一个, 挂多个数据集时容易
+        # 拿到错的仓库; 现在歧义直接报错, 让用户明确挂载关系。
+        archives = sorted(kaggle_input.rglob(f"{REPO_NAME}.zip"))
+        if len(archives) > 1:
+            raise RuntimeError(
+                f"找到多个仓库压缩包 {REPO_NAME}.zip, 无法确定用哪一个: "
+                + ", ".join(str(path) for path in archives)
+            )
+        if archives:
+            archive = archives[0]
             extracted = Path(tempfile.gettempdir()) / "cloud_codegen_input" / REPO_NAME
             if extracted.exists():
                 shutil.rmtree(extracted)
@@ -94,9 +103,14 @@ def locate_repository() -> Path:
                 bundle.extractall(destination)
             return extracted
 
-        for candidate in sorted(kaggle_input.rglob(REPO_NAME)):
-            if candidate.is_dir():
-                return candidate
+        candidates = [p for p in sorted(kaggle_input.rglob(REPO_NAME)) if p.is_dir()]
+        if len(candidates) > 1:
+            raise RuntimeError(
+                f"找到多个仓库目录 {REPO_NAME}, 无法确定用哪一个: "
+                + ", ".join(str(path) for path in candidates)
+            )
+        if candidates:
+            return candidates[0]
         raise FileNotFoundError(
             f"在 /kaggle/input 下找不到 {REPO_NAME}/, "
             f"push 时是否忘了用 -d 挂载数据集?"

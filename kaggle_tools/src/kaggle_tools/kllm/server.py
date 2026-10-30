@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import time
 import uuid
@@ -109,11 +110,14 @@ def create_app(settings: Settings | None = None,
         return response
 
     def check_local_key(authorization: str | None) -> None:
-        """校验本地访问密钥(未设置 KLLM_LOCAL_KEY 时不校验)。"""
+        """校验本地访问密钥(未设置 KLLM_LOCAL_KEY 时不校验)。
+
+        用 compare_digest 而不是 ==, 避免逐字节比较的时间差泄露密钥前缀。
+        """
         if settings.local_key is None:
             return
         expected = f"Bearer {settings.local_key}"
-        if authorization != expected:
+        if not hmac.compare_digest(authorization or "", expected):
             raise HTTPException(status_code=401, detail="本地密钥不正确")
 
     async def credentials(stale=None):
@@ -151,9 +155,14 @@ def create_app(settings: Settings | None = None,
 
     @app.get("/v1/usage")
     async def usage(authorization: str | None = Header(default=None)) -> dict:
-        """本地估算的今日/本月用量与额度。"""
+        """本地估算的今日/本月用量与额度, 附今日/本月按模型分的花费。"""
         check_local_key(authorization)
-        return {**ledger.status().to_dict(), "timezone": settings.usage_timezone}
+        return {
+            **ledger.status().to_dict(),
+            "timezone": settings.usage_timezone,
+            "by_model_today": ledger.model_breakdown("today"),
+            "by_model_month": ledger.model_breakdown("month"),
+        }
 
     def budget_headers(status) -> dict[str, str]:
         """额度相关响应头(只用 ASCII)。"""
@@ -175,6 +184,8 @@ def create_app(settings: Settings | None = None,
         """转发聊天补全请求, 支持流式与非流式。"""
         check_local_key(authorization)
         raw_body = await request.body()
+        if len(raw_body) > settings.max_request_bytes:
+            raise HTTPException(status_code=413, detail="请求体超出上限")
         try:
             payload = json.loads(raw_body)
         except ValueError as error:
@@ -182,8 +193,28 @@ def create_app(settings: Settings | None = None,
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
 
+        model = payload.get("model", "")
+        streaming = bool(payload.get("stream"))
+        logger.info("chat model=%s stream=%s", model, streaming)
+
+        # 先占并发槽位再查额度: 原先先查额度后排队, 排队期间所有请求
+        # 都能通过旧账本的检查, 超支上限会被排队长度放大。现在超支最多
+        # 是同时在途的 max_concurrency 个请求, 排队请求在真正发往上游
+        # 前会再查一次最新账本。
+        try:
+            if settings.queue_timeout_seconds:
+                await asyncio.wait_for(limiter.acquire(),
+                                       timeout=settings.queue_timeout_seconds)
+            else:
+                await limiter.acquire()
+        except TimeoutError as error:
+            raise HTTPException(status_code=503, detail="网关并发排队超时, 请稍后重试") from error
+        released = False
+
         budget = ledger.status()
         if budget.exceeded:
+            limiter.release()
+            released = True
             logger.warning("拒绝请求: %s", budget.exceeded)
             return JSONResponse(
                 status_code=429,
@@ -193,13 +224,6 @@ def create_app(settings: Settings | None = None,
             )
         if budget.warning:
             logger.warning("额度告警: %s", budget.warning)
-
-        model = payload.get("model", "")
-        streaming = bool(payload.get("stream"))
-        logger.info("chat model=%s stream=%s", model, streaming)
-
-        await limiter.acquire()
-        released = False
 
         def release() -> None:
             nonlocal released
@@ -222,14 +246,19 @@ def create_app(settings: Settings | None = None,
         return response
 
     async def _send_with_fallback(payload: dict, streaming: bool) -> tuple[httpx.Response, str]:
-        """按 [请求的模型] + 备用模型依次尝试, 返回(响应, 实际使用的模型)。"""
+        """按 [请求的模型] + 备用模型依次尝试, 返回(响应, 实际使用的模型)。
+
+        全链路总尝试数受 KLLM_MAX_TOTAL_ATTEMPTS 约束, 避免“每模型都重试满”
+        把一次请求放大成十几次上游调用。
+        """
         requested = payload.get("model", "")
         chain = [requested] + [m for m in settings.fallback_models if m != requested]
+        attempt_budget = {"remaining": settings.max_total_attempts or 1_000_000_000}
         for index, model in enumerate(chain):
             is_last = index == len(chain) - 1
             attempt_payload = payload if model == requested else {**payload, "model": model}
             try:
-                response = await _send_with_retry(attempt_payload, streaming)
+                response = await _send_with_retry(attempt_payload, streaming, attempt_budget)
             except HTTPException as error:
                 if is_last or error.status_code != 502:
                     raise
@@ -243,12 +272,20 @@ def create_app(settings: Settings | None = None,
             return response, model
         raise AssertionError("unreachable")
 
-    async def _send_with_retry(payload: dict, streaming: bool) -> httpx.Response:
+    async def _send_with_retry(payload: dict, streaming: bool,
+                               attempt_budget: dict | None = None) -> httpx.Response:
         """发请求并按策略重试; 网络错误耗尽重试后返回 502。"""
         active = await credentials()
         token_refreshed = False
         attempt = 0
         while True:
+            if attempt_budget is not None:
+                if attempt_budget["remaining"] <= 0:
+                    raise HTTPException(
+                        status_code=502,
+                        detail="已达总尝试上限(KLLM_MAX_TOTAL_ATTEMPTS), 停止换模型重试",
+                    )
+                attempt_budget["remaining"] -= 1
             try:
                 response = await _send_once(payload, streaming, active)
             except httpx.TransportError as error:
