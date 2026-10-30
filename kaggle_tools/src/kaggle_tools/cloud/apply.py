@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import re
 import subprocess
 from dataclasses import dataclass
@@ -56,6 +57,15 @@ def _diff_lines(text: str):
         yield line, body
 
 
+def _unquote_diff_path(path: str) -> str:
+    """解码 Git 文件头的 C 风格引号与 UTF-8 八进制转义。"""
+    if path.startswith('"') and path.endswith('"'):
+        return codecs.escape_decode(path[1:-1].encode("utf-8"))[0].decode(
+            "utf-8", errors="surrogateescape"
+        )
+    return path
+
+
 def diff_file_paths(text: str) -> tuple[str, ...]:
     """解析 unified diff 里涉及的文件相对路径(不含 a/ b/ 前缀)。
 
@@ -68,9 +78,9 @@ def diff_file_paths(text: str) -> tuple[str, ...]:
         if body:
             continue
         if line.startswith("--- "):
-            previous_old = line[4:].strip()
+            previous_old = _unquote_diff_path(line[4:].strip())
         elif line.startswith("+++ "):
-            new = line[4:].strip()
+            new = _unquote_diff_path(line[4:].strip())
             path = new if new != "/dev/null" else previous_old
             if path == "/dev/null" or not path:
                 continue
@@ -90,9 +100,9 @@ def summarize_diff(text: str) -> DiffSummary:
             added += line.startswith("+")
             removed += line.startswith("-")
         elif line.startswith("--- "):
-            previous_old = line[4:].strip()
+            previous_old = _unquote_diff_path(line[4:].strip())
         elif line.startswith("+++ "):
-            new = line[4:].strip()
+            new = _unquote_diff_path(line[4:].strip())
             path = new if new != "/dev/null" else previous_old
             name = path[2:] if path[:2] in ("a/", "b/") else path
             if new == "/dev/null":
@@ -165,9 +175,10 @@ def apply_diff(repo: Path, diff_path: Path, branch: str | None = None,
     git(repo, "apply", str(diff_path))
     if commit:
         # 原先 git add -A 会把 --allow-dirty 下与 diff 无关的未提交文件也
-        # 一起提交进去; 现在只暂存 diff 里出现的文件。
+        # 一起提交进去; 现在只暂存并提交 diff 文件, 保留其余文件的暂存状态。
         paths = diff_file_paths(text)
         if paths:
             git(repo, "add", "--", *paths)
-        git(repo, "commit", "-q", "-m", f"kcloud: apply {diff_path.name}\n\nsource: {diff_path}")
+        git(repo, "commit", "--only", "-q", "-m",
+            f"kcloud: apply {diff_path.name}\n\nsource: {diff_path}", "--", *paths)
     return branch, summary
