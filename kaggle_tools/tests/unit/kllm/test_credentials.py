@@ -1,5 +1,6 @@
 """TokenManager 的续期、缓存与并发行为。"""
 
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -107,7 +108,9 @@ def test_disk_cache_survives_a_new_manager(tmp_path, monkeypatch):
     monkeypatch.setattr(credentials_module, "fetch_from_kaggle_api", explode)
     monkeypatch.setattr(credentials_module, "fetch_from_kaggle_cli", explode)
     assert TokenManager(settings).get().token == "token-1"
-    assert oct(settings.credentials_path.stat().st_mode)[-3:] == "600"
+    # Windows 使用 ACL; st_mode 只暴露只读标志, 不表示访问权限。
+    if os.name != "nt":
+        assert oct(settings.credentials_path.stat().st_mode)[-3:] == "600"
 
 
 def test_falls_back_to_cli_when_private_api_breaks(tmp_path, monkeypatch):

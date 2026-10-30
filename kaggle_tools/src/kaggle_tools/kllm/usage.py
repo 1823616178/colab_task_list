@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
@@ -52,18 +56,62 @@ def extract_record(model: str, response_body: dict, streamed: bool,
     return record
 
 
+@contextmanager
+def _ledger_file_lock(usage_path: Path):
+    """所有读写共用独立锁文件; 替换账本时锁文件不变, 不可删除。"""
+    usage_path.parent.mkdir(parents=True, exist_ok=True)
+    with usage_path.with_name(usage_path.name + ".lock").open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            if handle.seek(0, os.SEEK_END) == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            # LK_LOCK 只重试 10 秒; 大账本归档可能更久, 不能因此丢掉写入。
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as error:
+                    if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _append_record_unlocked(usage_path: Path, record: dict) -> None:
+    with usage_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
 def append_record(usage_path: Path, record: dict) -> None:
     """把一条记录追加进账本, 失败不影响主流程。"""
     try:
-        usage_path.parent.mkdir(parents=True, exist_ok=True)
-        with usage_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
+        with _ledger_file_lock(usage_path):
+            _append_record_unlocked(usage_path, record)
     except OSError as error:
         logger.warning("写用量账本 %s 失败: %s", usage_path, error)
 
 
 def load_records(usage_path: Path) -> list[dict]:
     """读取账本全部记录, 跳过损坏行。"""
+    with _ledger_file_lock(usage_path):
+        return _load_records_unlocked(usage_path)
+
+
+def _load_records_unlocked(usage_path: Path) -> list[dict]:
     if not usage_path.exists():
         return []
     records = []
@@ -210,7 +258,7 @@ class Ledger:
         self._by_month_model: dict[tuple[str, str], list[int]] = {}
         self._known_size: int | None = None
         self._known_mtime_ns: int | None = None
-        with self._lock:
+        with self._lock, _ledger_file_lock(self.usage_path):
             self._rebuild_locked()
 
     def _accumulate_locked(self, record: dict) -> None:
@@ -237,7 +285,7 @@ class Ledger:
                 bucket[index] += value
 
     def _rebuild_locked(self) -> None:
-        self._records = load_records(self.usage_path)
+        self._records = _load_records_unlocked(self.usage_path)
         self._by_day.clear()
         self._by_month.clear()
         self._by_day_model.clear()
@@ -270,16 +318,24 @@ class Ledger:
     def record(self, record: dict) -> None:
         """追加一条记录(落盘 + 内存聚合)。"""
         with self._lock:
-            append_record(self.usage_path, record)
-            self._records.append(record)
-            self._accumulate_locked(record)
-            self._refresh_known_locked()
+            try:
+                with _ledger_file_lock(self.usage_path):
+                    self._maybe_reload_locked()
+                    _append_record_unlocked(self.usage_path, record)
+                    self._records.append(record)
+                    self._accumulate_locked(record)
+                    self._refresh_known_locked()
+            except OSError as error:
+                logger.warning("写用量账本 %s 失败: %s", self.usage_path, error)
+                # 保留原有行为: 落盘失败仍记入本进程的额度。
+                self._records.append(record)
+                self._accumulate_locked(record)
 
     def status(self, now: datetime | None = None) -> BudgetStatus:
         """按本地时区计算今日/本月用量(聚合查询, 不扫全量记录)。"""
         now = (now or datetime.now(timezone.utc)).astimezone(self.tz)
         day_key, month_key = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
-        with self._lock:
+        with self._lock, _ledger_file_lock(self.usage_path):
             self._maybe_reload_locked()
             today = _totals_to_summary(self._by_day.get(day_key, _empty_totals()))
             month = _totals_to_summary(self._by_month.get(month_key, _empty_totals()))
@@ -299,7 +355,7 @@ class Ledger:
         now = (now or datetime.now(timezone.utc)).astimezone(self.tz)
         key = now.strftime("%Y-%m-%d") if scope == "today" else now.strftime("%Y-%m")
         table = self._by_day_model if scope == "today" else self._by_month_model
-        with self._lock:
+        with self._lock, _ledger_file_lock(self.usage_path):
             self._maybe_reload_locked()
             result = {}
             for (period, model), totals in table.items():
@@ -320,7 +376,12 @@ def archive_old_records(usage_path: Path, before_month: str) -> tuple[int, int]:
     维护工具, 不是自动行为: 账本文件长期不清理会越来越大, 定期归档旧月份
     能让启动重建保持轻量。返回(保留条数, 归档条数)。
     """
-    records = load_records(usage_path)
+    with _ledger_file_lock(usage_path):
+        return _archive_old_records_locked(usage_path, before_month)
+
+
+def _archive_old_records_locked(usage_path: Path, before_month: str) -> tuple[int, int]:
+    records = _load_records_unlocked(usage_path)
     kept = [r for r in records if str(r.get("ts", ""))[:7] >= before_month]
     archived = [r for r in records if str(r.get("ts", ""))[:7] < before_month]
     if not archived:

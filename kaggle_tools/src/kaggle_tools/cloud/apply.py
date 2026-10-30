@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,6 +36,26 @@ def is_empty_diff(text: str) -> bool:
     return text.strip() in EMPTY_DIFF_MARKERS
 
 
+def _diff_lines(text: str):
+    """标记 hunk 正文, 避免把正文里的 ---/+++ 当成文件头。"""
+    old_remaining = new_remaining = 0
+    for line in text.splitlines():
+        hunk = re.match(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)
+        if hunk:
+            old_remaining = int(hunk[1]) if hunk[1] is not None else 1
+            new_remaining = int(hunk[2]) if hunk[2] is not None else 1
+            continue
+        if line.startswith("\\"):
+            continue
+        body = old_remaining > 0 or new_remaining > 0
+        if body:
+            if line.startswith(("-", " ")):
+                old_remaining -= 1
+            if line.startswith(("+", " ")):
+                new_remaining -= 1
+        yield line, body
+
+
 def diff_file_paths(text: str) -> tuple[str, ...]:
     """解析 unified diff 里涉及的文件相对路径(不含 a/ b/ 前缀)。
 
@@ -43,7 +64,9 @@ def diff_file_paths(text: str) -> tuple[str, ...]:
     """
     paths: list[str] = []
     previous_old = ""
-    for line in text.splitlines():
+    for line, body in _diff_lines(text):
+        if body:
+            continue
         if line.startswith("--- "):
             previous_old = line[4:].strip()
         elif line.startswith("+++ "):
@@ -62,8 +85,11 @@ def summarize_diff(text: str) -> DiffSummary:
     files: list[str] = []
     added = removed = 0
     previous_old = ""
-    for line in text.splitlines():
-        if line.startswith("--- "):
+    for line, body in _diff_lines(text):
+        if body:
+            added += line.startswith("+")
+            removed += line.startswith("-")
+        elif line.startswith("--- "):
             previous_old = line[4:].strip()
         elif line.startswith("+++ "):
             new = line[4:].strip()
@@ -74,10 +100,6 @@ def summarize_diff(text: str) -> DiffSummary:
             elif previous_old == "/dev/null":
                 name += " (新增)"
             files.append(name)
-        elif line.startswith("+"):
-            added += 1
-        elif line.startswith("-"):
-            removed += 1
     return DiffSummary(tuple(files), added, removed)
 
 
