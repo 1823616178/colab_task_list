@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "kaggle==2.2.4",
     "kaggle-benchmarks==0.6.1",
+    "anyio==4.15.1",
     "fastapi==0.141.1",
     "uvicorn==0.52.4",
     "httpx==0.28.1",

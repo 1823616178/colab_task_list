@@ -12,6 +12,7 @@ anyio==4.15.1
     #   httpx
     #   httpx2
     #   jupyter-server
+    #   kaggle-tools
     #   openai
     #   starlette
 anysqlite==0.0.5

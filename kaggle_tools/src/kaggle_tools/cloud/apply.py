@@ -35,6 +35,28 @@ def is_empty_diff(text: str) -> bool:
     return text.strip() in EMPTY_DIFF_MARKERS
 
 
+def diff_file_paths(text: str) -> tuple[str, ...]:
+    """解析 unified diff 里涉及的文件相对路径(不含 a/ b/ 前缀)。
+
+    删除文件时 +++ 是 /dev/null, 此时取 --- 的旧路径, 这样 git add 才能
+    把删除也暂存进去。返回顺序与 diff 中出现顺序一致, 去重。
+    """
+    paths: list[str] = []
+    previous_old = ""
+    for line in text.splitlines():
+        if line.startswith("--- "):
+            previous_old = line[4:].strip()
+        elif line.startswith("+++ "):
+            new = line[4:].strip()
+            path = new if new != "/dev/null" else previous_old
+            if path == "/dev/null" or not path:
+                continue
+            name = path[2:] if path[:2] in ("a/", "b/") else path
+            if name not in paths:
+                paths.append(name)
+    return tuple(paths)
+
+
 def summarize_diff(text: str) -> DiffSummary:
     """统计 unified diff 涉及的文件与增删行数。"""
     files: list[str] = []
@@ -120,6 +142,10 @@ def apply_diff(repo: Path, diff_path: Path, branch: str | None = None,
     git(repo, "switch", "-c", branch)
     git(repo, "apply", str(diff_path))
     if commit:
-        git(repo, "add", "-A")
+        # 原先 git add -A 会把 --allow-dirty 下与 diff 无关的未提交文件也
+        # 一起提交进去; 现在只暂存 diff 里出现的文件。
+        paths = diff_file_paths(text)
+        if paths:
+            git(repo, "add", "--", *paths)
         git(repo, "commit", "-q", "-m", f"kcloud: apply {diff_path.name}\n\nsource: {diff_path}")
     return branch, summary

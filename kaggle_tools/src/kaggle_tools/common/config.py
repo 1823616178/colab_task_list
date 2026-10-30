@@ -79,6 +79,19 @@ class Settings:
     retry_statuses: tuple[int, ...] = (429, 503)
     # 首选模型失败(429/5xx/网络)时依次尝试的备用模型。
     fallback_models: tuple[str, ...] = ()
+    # 排队等待上游并发槽位的最长秒数, 0 表示无限等待(不推荐)。
+    queue_timeout_seconds: float = 30.0
+    # 一次网关请求在“重试 + 换备用模型”全链路上的总尝试上限, 0 表示不限制。
+    # 默认 8: 首选模型重试 3 次(共 4 次)后, 备用模型链路最多再试 4 次,
+    # 避免“每模型都重试满”把延迟和费用放大数倍。
+    max_total_attempts: int = 8
+    # 单个网关请求体的最大字节数, 超出返回 413, 防止超大请求占满内存。
+    max_request_bytes: int = 10_000_000
+    # kcloud local 本机执行的总超时(秒), 0 表示不限制; Modal 执行超时见下。
+    local_timeout_seconds: int = 3600
+    modal_timeout_seconds: int = 3600
+    # 实际生效的 .env 文件(如果有), 仅用于启动时提示, 不参与校验。
+    env_file: Path | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.port <= 65535:
@@ -103,6 +116,14 @@ class Settings:
             raise ConfigError(f"KLLM_BUDGET_WARN_RATIO 须在 (0, 1] 之间, 收到 {self.budget_warn_ratio}")
         if self.max_concurrency < 1:
             raise ConfigError(f"KLLM_MAX_CONCURRENCY 至少为 1, 收到 {self.max_concurrency}")
+        if self.queue_timeout_seconds < 0:
+            raise ConfigError(f"KLLM_QUEUE_TIMEOUT 不能为负数, 收到 {self.queue_timeout_seconds}")
+        if self.max_total_attempts < 0:
+            raise ConfigError(f"KLLM_MAX_TOTAL_ATTEMPTS 不能为负数, 收到 {self.max_total_attempts}")
+        if self.max_request_bytes <= 0:
+            raise ConfigError(f"KLLM_MAX_REQUEST_BYTES 必须大于 0, 收到 {self.max_request_bytes}")
+        if self.local_timeout_seconds < 0 or self.modal_timeout_seconds < 0:
+            raise ConfigError("KCLOUD_LOCAL_TIMEOUT / KCLOUD_MODAL_TIMEOUT 不能为负数")
         for code in self.retry_statuses:
             if not 400 <= code <= 599:
                 raise ConfigError(f"KLLM_RETRY_STATUSES 只能包含 4xx/5xx, 收到 {code}")
@@ -195,6 +216,14 @@ def load_settings(environ: Mapping[str, str] | None = None,
                   env_file: Path | None = None) -> Settings:
     """从环境变量(及 .env)构造并校验 Settings。"""
     env = merged_environment(environ, env_file)
+    # 记录实际生效的 .env, 便于启动时告诉用户“配置到底从哪读的”:
+    # 显式传入的文件优先, 其次 KAGGLE_TOOLS_ENV_FILE, 最后当前目录的 .env。
+    if env_file is not None:
+        effective_env_file = env_file if env_file.is_file() else None
+    else:
+        configured = env.get("KAGGLE_TOOLS_ENV_FILE", "").strip()
+        candidate = Path(configured).expanduser() if configured else Path.cwd() / ".env"
+        effective_env_file = candidate if candidate.is_file() else None
     log_file = env.get("KLLM_LOG_FILE", "").strip()
     return Settings(
         host=env.get("KLLM_HOST", "").strip() or "127.0.0.1",
@@ -220,4 +249,10 @@ def load_settings(environ: Mapping[str, str] | None = None,
         max_concurrency=_number(env, "KLLM_MAX_CONCURRENCY", 4, int),
         retry_statuses=_statuses(env, (429, 503)),
         fallback_models=_csv(env, "KLLM_FALLBACK_MODELS"),
+        queue_timeout_seconds=_number(env, "KLLM_QUEUE_TIMEOUT", 30.0, float),
+        max_total_attempts=_number(env, "KLLM_MAX_TOTAL_ATTEMPTS", 8, int),
+        max_request_bytes=_number(env, "KLLM_MAX_REQUEST_BYTES", 10_000_000, int),
+        local_timeout_seconds=_number(env, "KCLOUD_LOCAL_TIMEOUT", 3600, int),
+        modal_timeout_seconds=_number(env, "KCLOUD_MODAL_TIMEOUT", 3600, int),
+        env_file=effective_env_file,
     )

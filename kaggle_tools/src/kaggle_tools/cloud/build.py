@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -16,6 +17,8 @@ TASK_FILES = ("repo_task.py", "spec_task.py", "codegen_task.py")
 INLINE_PATTERN = re.compile(rf"^from {SHARED_MODULE} import \*.*$", re.MULTILINE)
 GENERATED_HEADER = (
     "# ⚠ 由 kcloud build 生成, 请勿手改; 源码在 src/kaggle_tools/tasks_src/{name}\n"
+    "# 源码哈希: {digest} (任务源码 + 共享模块的 SHA-256 前 16 位, "
+    "手动 push 旧生成物时可据此核对是否过期)\n"
 )
 
 
@@ -42,7 +45,10 @@ def render_task(name: str, source_directory: Path = SOURCE_DIRECTORY) -> str:
         raise BuildError(f"{name} 必须恰好有一行 `from {SHARED_MODULE} import *`, 找到 {len(matches)}")
     body = shared_body(source_directory)
     rendered = INLINE_PATTERN.sub(lambda _match: body, source, count=1)
-    return GENERATED_HEADER.format(name=name) + rendered
+    digest = hashlib.sha256(
+        (source + body).encode("utf-8")
+    ).hexdigest()[:16]
+    return GENERATED_HEADER.format(name=name, digest=digest) + rendered
 
 
 def build_tasks(output_directory: Path, source_directory: Path = SOURCE_DIRECTORY) -> list[Path]:

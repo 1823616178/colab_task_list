@@ -2075,6 +2075,7 @@ name = "kaggle-tools"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "kaggle" },
@@ -2094,6 +2095,7 @@ modal = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = "==4.15.1" },
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "kaggle", specifier = "==2.2.4" },
